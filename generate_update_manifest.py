@@ -59,9 +59,11 @@ EXCLUDED_DIR_NAMES = {
     'nginx',
     'node_modules',
     'qr_screenshots',
+    'tests',
     'trajectory_history',
     'update_backup',
     'uploads',
+    'userscripts',
     'venv',
 }
 
@@ -117,6 +119,9 @@ def is_excluded_path(relative_path: Path) -> bool:
         return True
 
     if relative_path.name in EXCLUDED_FILE_NAMES:
+        return True
+
+    if relative_path.suffix.lower() == '.html' and 'preview' in relative_path.stem.lower():
         return True
 
     return any(part in EXCLUDED_DIR_NAMES for part in relative_path.parts)
@@ -248,6 +253,11 @@ def extract_manifest_paths(entries: List[Any]) -> Set[str]:
     return paths
 
 
+def should_include_deleted_path(path: str) -> bool:
+    """判断删除清单中是否应包含该路径"""
+    return not is_excluded_path(Path(normalize_manifest_path(path)))
+
+
 def build_deleted_files(current_paths: Set[str], previous_manifest: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """基于历史 manifest 生成累积删除列表"""
     if not previous_manifest:
@@ -255,7 +265,8 @@ def build_deleted_files(current_paths: Set[str], previous_manifest: Optional[Dic
 
     previous_paths = extract_manifest_paths(previous_manifest.get('files', []))
     historical_deleted_paths = extract_manifest_paths(previous_manifest.get('deleted_files', []))
-    deleted_paths = sorted((historical_deleted_paths | (previous_paths - current_paths)) - current_paths)
+    candidate_deleted_paths = (historical_deleted_paths | (previous_paths - current_paths)) - current_paths
+    deleted_paths = sorted(path for path in candidate_deleted_paths if should_include_deleted_path(path))
 
     return [
         {

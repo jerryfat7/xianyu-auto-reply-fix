@@ -19362,7 +19362,7 @@ function exportSearchResults() {
 
 
 // 默认版本号（当无法读取 version.txt 时使用）
-const DEFAULT_VERSION = 'v2.0.0';
+const DEFAULT_VERSION = 'v2.0.1';
 
 // 当前本地版本号（动态从 version.txt 读取）
 let LOCAL_VERSION = DEFAULT_VERSION;
@@ -19473,9 +19473,22 @@ function clearIgnoredUpdateVersion(showFeedback = true) {
 
 // 本地版本历史（远程服务禁用时使用）
 const LOCAL_VERSION_HISTORY = {
-    version: 'v2.0.0',
+    version: 'v2.0.1',
     intro: '本系统仅供个人学习研究使用，请勿用于商业用途。如有问题或建议，欢迎反馈。',
     versionHistory: [
+        {
+            version: 'v2.0.1',
+            date: '2026-05-28',
+            updates: [
+                '【新功能】新增商品发布素材管理与批量发布能力，支持素材集中维护并批量执行发布任务',
+                '【新功能】新增历史订单补评价与自动求小红花流程，补齐订单售后运营自动化能力',
+                '【新功能】新增统一任务日志中心，集中查看任务执行日志并提升排查效率',
+                '【优化】仪表盘公告卡片支持摘要展示并优化卡片布局，同时允许关闭公告提示',
+                '【修复】修复在线客服 Web 端自发消息不显示、消息时间 UTC 偏移和系统文案污染买家昵称等问题',
+                '【修复】修复滑块验证后 _m_h5_tk 域名落点导致 Token 刷新非法请求，账密登录后优先快照 goofish 域 Token',
+                '【修复】修复自动评价接口调用链路，改为本地评价接口并补齐补评任务',
+            ]
+        },
         {
             version: 'v2.0.0',
             date: '2026-05-19',
