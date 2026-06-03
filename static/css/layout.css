@@ -372,11 +372,54 @@ body.sidebar-collapsed .main-content {
   background: var(--text-secondary);
 }
 
-.chat-account-name {
+.chat-account-dot.pending {
+  background: #f59e0b;
+}
+
+.chat-account-main {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat-account-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chat-account-status {
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--text-secondary);
+}
+
+.chat-account-status.online {
+  color: #15803d;
+}
+
+.chat-account-status.pending {
+  color: #b45309;
+}
+
+.chat-account-action {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--card-bg);
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.chat-account-action:hover {
+  color: var(--primary-color);
+  border-color: var(--primary-color);
 }
 
 .chat-session-list {
@@ -435,12 +478,45 @@ body.sidebar-collapsed .main-content {
   margin-left: 10px;
 }
 
+.chat-session-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .chat-session-name {
+  flex: 1;
+  min-width: 0;
   font-weight: 600;
   font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.chat-session-source,
+.chat-session-unread {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.chat-session-source {
+  color: #0f766e;
+  background: rgba(20, 184, 166, 0.14);
+}
+
+.chat-session-unread {
+  color: #fff;
+  background: #dc2626;
 }
 
 .chat-session-tag {
@@ -501,6 +577,34 @@ body.sidebar-collapsed .main-content {
   flex-shrink: 0;
   margin-left: 6px;
   align-self: flex-start;
+}
+
+.chat-load-more-btn,
+.chat-history-more {
+  width: calc(100% - 20px);
+  margin: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--card-bg);
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 10px;
+  font-size: 12px;
+}
+
+.chat-load-more-btn:hover,
+.chat-history-more:hover {
+  color: var(--primary-color);
+  border-color: var(--primary-color);
+}
+
+.chat-history-more {
+  margin: 0 auto 14px;
+  width: auto;
+  min-width: 132px;
 }
 
 .chat-main-area {

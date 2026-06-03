@@ -1950,6 +1950,7 @@ class XianyuLive:
         self.last_heartbeat_response = 0
         self.last_sent_heartbeat_mid = None
         self.pending_heartbeat_mids = deque(maxlen=32)
+        self.lwp_response_waiters = {}
         self.heartbeat_task = None
         self.ws = None
         self.last_non_heartbeat_message_time = 0
@@ -12169,6 +12170,68 @@ class XianyuLive:
         await ws.send(json.dumps(msg))
         logger.info(f'【{self.cookie_id}】连接注册完成')
 
+    async def _ack_lwp_message(self, ws, message: dict) -> None:
+        try:
+            headers = message.get("headers", {}) if isinstance(message, dict) else {}
+            ack = {
+                "code": 200,
+                "headers": {
+                    "mid": headers.get("mid", generate_mid()),
+                    "sid": headers.get("sid", ""),
+                }
+            }
+            if 'app-key' in headers:
+                ack["headers"]["app-key"] = headers["app-key"]
+            if 'ua' in headers:
+                ack["headers"]["ua"] = headers["ua"]
+            if 'dt' in headers:
+                ack["headers"]["dt"] = headers["dt"]
+            await ws.send(json.dumps(ack))
+        except Exception:
+            pass
+
+    def _resolve_lwp_response_waiter(self, message_data: dict) -> bool:
+        try:
+            headers = message_data.get("headers", {}) if isinstance(message_data, dict) else {}
+            mid = str(headers.get("mid") or "")
+            if not mid:
+                return False
+            future = self.lwp_response_waiters.pop(mid, None)
+            if not future:
+                return False
+            if not future.done():
+                future.set_result(message_data)
+            return True
+        except Exception as e:
+            logger.debug(f"【{self.cookie_id}】分发LWP响应失败: {self._safe_str(e)}")
+            return False
+
+    async def _request_lwp_on_current_ws(self, lwp: str, body: list, timeout: int = 10):
+        ws = self.ws
+        if not ws or getattr(ws, 'closed', False):
+            return {"code": "not_connected", "reason": "账号WebSocket未连接"}
+
+        mid = generate_mid()
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        self.lwp_response_waiters[mid] = future
+        try:
+            await ws.send(json.dumps({
+                "lwp": lwp,
+                "headers": {"mid": mid},
+                "body": body,
+            }))
+            response = await asyncio.wait_for(future, timeout=max(1, int(timeout or 10)))
+            return response.get("body", {}) if isinstance(response, dict) else {}
+        except asyncio.TimeoutError:
+            return {"code": "timeout", "reason": "IM请求超时"}
+        except Exception as e:
+            return {"code": "request_failed", "reason": self._safe_str(e)}
+        finally:
+            current = self.lwp_response_waiters.pop(mid, None)
+            if current and not current.done():
+                current.cancel()
+
     async def list_all_conversations(self, cid: str, page_size: int = 20):
         """拉取指定会话的历史消息。"""
         logger.info(f"【{self.cookie_id}】开始通过独立临时连接拉取历史消息: chat_id={cid}, page_size={page_size}")
@@ -12290,6 +12353,85 @@ class XianyuLive:
                     return history_messages
 
         return []
+
+    async def list_newest_conversations(self, start_timestamp: int = None, limit: int = 20):
+        """通过当前主WebSocket拉取最近会话列表，避免临时连接挤掉主监听。"""
+        if start_timestamp in (None, '', 0, '0'):
+            start_timestamp = 9007199254740991
+
+        try:
+            start_timestamp = int(start_timestamp)
+        except (TypeError, ValueError):
+            start_timestamp = 9007199254740991
+
+        try:
+            limit = max(1, min(int(limit or 20), 100))
+        except (TypeError, ValueError):
+            limit = 20
+
+        logger.info(
+            f"【{self.cookie_id}】开始通过主连接拉取最近会话: "
+            f"cursor={start_timestamp}, limit={limit}"
+        )
+
+        last_body = {}
+        for attempt in range(3):
+            body = await self._request_lwp_on_current_ws(
+                "/r/Conversation/listNewestPagination",
+                [start_timestamp, limit],
+                timeout=10,
+            )
+            last_body = body if isinstance(body, dict) else {}
+            if isinstance(last_body, dict) and last_body.get("code") == "400600001" and attempt < 2:
+                wait_seconds = (attempt + 1) * 2
+                logger.warning(
+                    f"【{self.cookie_id}】最近会话拉取被流控，{wait_seconds}秒后重试 "
+                    f"({attempt + 1}/3)"
+                )
+                await asyncio.sleep(wait_seconds)
+                continue
+            logger.info(
+                f"【{self.cookie_id}】最近会话拉取完成: "
+                f"count={len(last_body.get('userConvs', [])) if isinstance(last_body, dict) else 0}"
+            )
+            return last_body
+
+        return last_body
+
+    async def list_conversation_messages_page(self, cid: str, start_timestamp: int = None, limit: int = 20):
+        """通过当前主WebSocket分页拉取指定会话消息，避免临时连接挤掉主监听。"""
+        normalized_cid = str(cid or '').strip()
+        if not normalized_cid:
+            return {"code": "missing_cid", "reason": "缺少会话ID"}
+        full_cid = normalized_cid if '@goofish' in normalized_cid else f"{normalized_cid}@goofish"
+
+        if start_timestamp in (None, '', 0, '0'):
+            start_timestamp = 9007199254740991
+
+        try:
+            start_timestamp = int(start_timestamp)
+        except (TypeError, ValueError):
+            start_timestamp = 9007199254740991
+
+        try:
+            limit = max(1, min(int(limit or 20), 100))
+        except (TypeError, ValueError):
+            limit = 20
+
+        logger.info(
+            f"【{self.cookie_id}】开始通过主连接分页拉取消息: "
+            f"chat_id={normalized_cid}, cursor={start_timestamp}, limit={limit}"
+        )
+        body = await self._request_lwp_on_current_ws(
+            "/r/MessageManager/listUserMessages",
+            [full_cid, False, start_timestamp, limit, False],
+            timeout=10,
+        )
+        logger.info(
+            f"【{self.cookie_id}】分页消息拉取完成: "
+            f"chat_id={normalized_cid}, count={len(body.get('userMessageModels', [])) if isinstance(body, dict) else 0}"
+        )
+        return body if isinstance(body, dict) else {}
 
     async def fetch_conversation_history_once(self, cid: str, page_size: int = 20):
         """使用独立临时实例拉取历史消息，避免影响主连接状态。"""
@@ -16080,6 +16222,10 @@ class XianyuLive:
                             async for message in websocket:
                                 try:
                                     message_data = json.loads(message)
+
+                                    if self._resolve_lwp_response_waiter(message_data):
+                                        await self._ack_lwp_message(websocket, message_data)
+                                        continue
                                     
                                     # 提取消息标识用于日志追踪（防止异步处理导致日志混乱）
                                     msg_id = "unknown"

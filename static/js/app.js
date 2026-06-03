@@ -19761,7 +19761,7 @@ function exportSearchResults() {
 
 
 // 默认版本号（当无法读取 version.txt 时使用）
-const DEFAULT_VERSION = 'v2.0.1';
+const DEFAULT_VERSION = 'v2.0.2';
 
 // 当前本地版本号（动态从 version.txt 读取）
 let LOCAL_VERSION = DEFAULT_VERSION;
@@ -19872,9 +19872,20 @@ function clearIgnoredUpdateVersion(showFeedback = true) {
 
 // 本地版本历史（远程服务禁用时使用）
 const LOCAL_VERSION_HISTORY = {
-    version: 'v2.0.1',
+    version: 'v2.0.2',
     intro: '本系统仅供个人学习研究使用，请勿用于商业用途。如有问题或建议，欢迎反馈。',
     versionHistory: [
+        {
+            version: 'v2.0.2',
+            date: '2026-06-03',
+            updates: [
+                '【新功能】新增黑名单管理能力，支持按买家、账号和商品维护拦截规则，自动回复、客服手动发送和发货流程会统一识别黑名单',
+                '【新功能】重写在线客服为直连闲鱼 IM 会话体验，支持账号连接状态、远程会话列表、历史消息分页和实时消息合并展示',
+                '【优化】在线客服三栏界面新增账号连接/断开、IM 来源标识、未读数、加载更多会话和更早消息入口，客服处理更集中',
+                '【修复】修复在线客服拉取会话时新建临时 WebSocket 导致主监听连接被挤下线的问题，改为复用主连接按 mid 分发 IM 响应',
+                '【修复】补强在线客服远程消息解析，文本、图片、卡片等消息可正常展示，并在 IM 异常时回退本地缓存和订单会话入口',
+            ]
+        },
         {
             version: 'v2.0.1',
             date: '2026-05-28',
@@ -21873,6 +21884,13 @@ let chatCurrentToUserId = '';
 let chatCurrentSenderName = '';
 let chatCurrentItemId = '';
 let chatSessionsCache = [];
+let chatAccountsCache = [];
+let chatCurrentAccount = null;
+let chatSessionsNextCursor = null;
+let chatSessionsHasMore = false;
+let chatMessagesNextCursor = null;
+let chatMessagesHasMore = false;
+let chatMessagesSource = 'remote_im';
 let chatOldestMsgId = null;
 let chatSseAbortController = null;
 let chatSseRetryCount = 0;
@@ -21972,6 +21990,15 @@ function mergeChatSessionLists(primarySessions, secondarySessions) {
     return sortChatSessions(merged);
 }
 
+function getChatAccountStatus(account) {
+    const state = account?.connection_state || 'not_running';
+    if (!account?.enabled) return { label: '已断开', className: 'offline' };
+    if (account?.connected) return { label: '已连接', className: 'online' };
+    if (state === 'connecting' || state === 'reconnecting') return { label: '连接中', className: 'pending' };
+    if (account?.running) return { label: '运行中', className: 'pending' };
+    return { label: '未连接', className: 'offline' };
+}
+
 async function refreshChatAccounts() {
     const body = document.getElementById('chatAccountsBody');
     if (!body) return;
@@ -21983,16 +22010,34 @@ async function refreshChatAccounts() {
             return;
         }
         const accounts = result.accounts || [];
+        chatAccountsCache = accounts;
+        chatCurrentAccount = accounts.find(account => account.id === chatCurrentCookieId) || null;
         if (!accounts.length) {
             body.innerHTML = '<div class="text-center text-muted py-4 small">暂无可用账号</div>';
             return;
         }
         body.innerHTML = '';
         accounts.forEach(account => {
+            const status = getChatAccountStatus(account);
+            const actionLabel = account.enabled && (account.running || account.connected) ? '断开' : '连接';
+            const actionIcon = actionLabel === '断开' ? 'bi-plug' : 'bi-play-circle';
             const div = document.createElement('div');
             div.className = 'chat-account-item' + (account.id === chatCurrentCookieId ? ' active' : '');
-            div.innerHTML = `<div class="chat-account-dot ${account.connected ? 'online' : 'offline'}"></div><div class="chat-account-name" title="${escapeHtml(account.id)}">${escapeHtml(account.name || account.id)}</div>`;
+            div.innerHTML = `
+                <div class="chat-account-dot ${status.className}"></div>
+                <div class="chat-account-main">
+                    <div class="chat-account-name" title="${escapeHtml(account.id)}">${escapeHtml(account.name || account.id)}</div>
+                    <div class="chat-account-status ${status.className}" title="${escapeHtml(account.message_stream_note || '')}">${escapeHtml(status.label)}</div>
+                </div>
+                <button class="chat-account-action" title="${escapeHtml(actionLabel)}">
+                    <i class="bi ${actionIcon}"></i>
+                </button>
+            `;
             div.onclick = () => selectChatAccount(account.id);
+            div.querySelector('.chat-account-action')?.addEventListener('click', event => {
+                event.stopPropagation();
+                toggleChatAccountConnection(account.id, actionLabel === '断开');
+            });
             body.appendChild(div);
         });
     } catch (error) {
@@ -22001,12 +22046,36 @@ async function refreshChatAccounts() {
     }
 }
 
+async function toggleChatAccountConnection(cookieId, disconnect = false) {
+    try {
+        const endpoint = disconnect ? 'disconnect' : 'connect';
+        const result = await fetchJSON(`${apiBase}/api/chat/${endpoint}/${encodeURIComponent(cookieId)}`, { method: 'POST' });
+        if (result.success) {
+            showToast(result.message || (disconnect ? '已断开连接' : '连接已启动'), 'success');
+        } else {
+            showToast(result.detail || result.message || '操作失败', 'danger');
+        }
+    } catch (error) {
+        console.error('切换客服连接失败:', error);
+        showToast(disconnect ? '断开失败' : '连接失败', 'danger');
+    }
+    await refreshChatAccounts();
+    if (cookieId === chatCurrentCookieId) {
+        await refreshChatSessions();
+    }
+}
+
 async function selectChatAccount(cookieId) {
     chatCurrentCookieId = cookieId;
+    chatCurrentAccount = chatAccountsCache.find(account => account.id === cookieId) || null;
     chatCurrentChatId = '';
     chatCurrentToUserId = '';
     chatCurrentSenderName = '';
     chatCurrentItemId = '';
+    chatSessionsNextCursor = null;
+    chatSessionsHasMore = false;
+    chatMessagesNextCursor = null;
+    chatMessagesHasMore = false;
     chatOldestMsgId = null;
     const placeholder = document.getElementById('chatMainPlaceholder');
     const active = document.getElementById('chatActiveArea');
@@ -22017,7 +22086,7 @@ async function selectChatAccount(cookieId) {
     await refreshChatSessions();
 }
 
-async function refreshChatSessions() {
+async function refreshChatSessions(append = false) {
     const body = document.getElementById('chatSessionsBody');
     if (!body) return;
     if (!chatCurrentCookieId) {
@@ -22025,25 +22094,43 @@ async function refreshChatSessions() {
         chatSessionsCache = [];
         return;
     }
-    body.innerHTML = '<div class="text-center text-muted py-4 small"><div class="spinner-border spinner-border-sm"></div></div>';
+    if (!append) {
+        chatSessionsNextCursor = null;
+        chatSessionsHasMore = false;
+        body.innerHTML = '<div class="text-center text-muted py-4 small"><div class="spinner-border spinner-border-sm"></div></div>';
+    }
     try {
-        const result = await fetchJSON(`${apiBase}/api/chat/sessions?cookie_id=${encodeURIComponent(chatCurrentCookieId)}&include_order_fallback=true&limit=120`);
+        let url = `${apiBase}/api/chat/sessions?cookie_id=${encodeURIComponent(chatCurrentCookieId)}&include_order_fallback=true&remote=true&limit=60`;
+        if (append && chatSessionsNextCursor) {
+            url += `&cursor=${encodeURIComponent(chatSessionsNextCursor)}`;
+        }
+        const result = await fetchJSON(url);
         if (!result.success) {
             body.innerHTML = '<div class="text-center text-muted py-4 small">加载失败</div>';
             return;
         }
-        chatSessionsCache = sortChatSessions(result.sessions || []);
-        chatSessionsCache = await enrichSessionsWithOrdersFallback(chatSessionsCache);
+        chatSessionsNextCursor = result.next_cursor || null;
+        chatSessionsHasMore = Boolean(result.has_more && chatSessionsNextCursor);
+        const incomingSessions = sortChatSessions(result.sessions || []);
+        chatSessionsCache = append ? mergeChatSessionLists(chatSessionsCache, incomingSessions) : incomingSessions;
+        if (!append && result.remote_error) {
+            console.debug('直连IM会话提示:', result.remote_error);
+        }
         if (!chatSessionsCache.length) {
-            body.innerHTML = '<div class="text-center text-muted py-4 small">暂无会话记录；若该账号已有订单，会自动显示可补拉历史的会话入口</div>';
+            const hint = result.remote_error || '暂无会话记录';
+            body.innerHTML = `<div class="text-center text-muted py-4 small">${escapeHtml(hint)}</div>`;
             return;
         }
         renderChatSessions(chatSessionsCache);
-        mergeHydrationFallbackSessions();
     } catch (error) {
         console.error('获取会话列表失败:', error);
         body.innerHTML = '<div class="text-center text-muted py-4 small">加载失败</div>';
     }
+}
+
+function loadMoreChatSessions() {
+    if (!chatSessionsHasMore || !chatSessionsNextCursor) return;
+    refreshChatSessions(true);
 }
 
 function buildChatSessionsFromOrdersData(orders, cookieId) {
@@ -22104,21 +22191,35 @@ function renderChatSessions(sessions) {
         const displayName = resolveSessionDisplayName(session);
         const avatar = resolveSessionAvatar(session);
         const sessionState = getChatSessionState(session);
-        const preview = String(sessionState.preview || resolveSessionPreview(session)).substring(0, 30);
-        const baseSubMeta = String(sessionState.submeta || '').trim();
+        const preview = String(sessionState.preview || resolveSessionPreview(session)).substring(0, 42);
+        const baseSubMeta = String(sessionState.submeta || session.item_title || '').trim();
         const priceMeta = session.item_price ? `<span class="chat-session-price">￥${escapeHtml(String(session.item_price))}</span>` : '';
+        const unread = Number(session.unread_count || 0);
+        const sourceTag = session.source === 'remote_im' ? '<span class="chat-session-source">IM</span>' : '';
         div.innerHTML = `
             <div class="chat-session-avatar">${avatar.type === 'image' ? `<img src="${escapeHtml(avatar.value)}" alt="avatar" class="chat-session-avatar-image">` : escapeHtml(avatar.value)}</div>
             <div class="chat-session-info">
-                <div class="chat-session-name">${escapeHtml(displayName)}</div>
+                <div class="chat-session-title-row">
+                    <div class="chat-session-name">${escapeHtml(displayName)}</div>
+                    ${sourceTag}
+                    ${unread > 0 ? `<span class="chat-session-unread">${unread > 99 ? '99+' : unread}</span>` : ''}
+                </div>
                 <div class="chat-session-preview">${escapeHtml(preview)}</div>
                 <div class="chat-session-submeta">${escapeHtml(baseSubMeta)}${priceMeta}</div>
             </div>
-            <div class="chat-session-time">${escapeHtml(formatChatTime(session.created_at))}</div>
+            <div class="chat-session-time">${escapeHtml(formatChatTime(session.created_at || session.lastMessageTime))}</div>
         `;
         div.onclick = () => selectChatSession(session);
         body.appendChild(div);
     });
+    if (chatSessionsHasMore) {
+        const more = document.createElement('button');
+        more.type = 'button';
+        more.className = 'chat-load-more-btn';
+        more.innerHTML = '<i class="bi bi-chevron-down"></i><span>加载更多会话</span>';
+        more.onclick = loadMoreChatSessions;
+        body.appendChild(more);
+    }
 }
 
 function mergeHydrationFallbackSessions() {
@@ -22156,20 +22257,27 @@ function filterChatSessions() {
         renderChatSessions(sortChatSessions(chatSessionsCache));
         return;
     }
+    const hasMoreBeforeFilter = chatSessionsHasMore;
+    chatSessionsHasMore = false;
     renderChatSessions(sortChatSessions(chatSessionsCache.filter(session =>
         String(session.sender_name || '').toLowerCase().includes(keyword)
         || String(session.buyer_name || '').toLowerCase().includes(keyword)
+        || String(session.item_title || '').toLowerCase().includes(keyword)
         || String(session.chat_id || '').includes(keyword)
         || String(normalizeChatSessionPreview(session.content, session.content_type) || '').toLowerCase().includes(keyword)
     )));
+    chatSessionsHasMore = hasMoreBeforeFilter;
 }
 
 async function selectChatSession(session) {
     session = { ...session, content: normalizeChatSessionPreview(session?.content, session?.content_type) };
     chatCurrentChatId = session.chat_id;
-    chatCurrentToUserId = session.buyer_id || (session.direction === 2 ? (session.sender_id || '') : '');
+    chatCurrentToUserId = session.buyer_id || session.sender_id || '';
     chatCurrentSenderName = resolveSessionDisplayName(session);
     chatCurrentItemId = session.item_id || '';
+    chatMessagesNextCursor = null;
+    chatMessagesHasMore = false;
+    chatMessagesSource = 'remote_im';
     chatOldestMsgId = null;
 
     const placeholder = document.getElementById('chatMainPlaceholder');
@@ -22183,30 +22291,6 @@ async function selectChatSession(session) {
 
     renderChatSessions(chatSessionsCache);
     await loadChatMessages(false);
-
-    try {
-        const result = await fetchJSON(`${apiBase}/api/chat/messages?cookie_id=${encodeURIComponent(chatCurrentCookieId)}&chat_id=${encodeURIComponent(chatCurrentChatId)}&limit=50`);
-        if (result.success && Array.isArray(result.messages)) {
-            const buyerMessage = result.messages.find(message => message.direction === 2);
-            if (buyerMessage) {
-                if (!chatCurrentToUserId) chatCurrentToUserId = buyerMessage.sender_id;
-                if (!chatCurrentSenderName || chatCurrentSenderName === chatCurrentChatId) {
-                    chatCurrentSenderName = buyerMessage.sender_name || buyerMessage.sender_id || chatCurrentChatId;
-                    if (headerName) headerName.textContent = chatCurrentSenderName;
-                }
-            }
-            const messageWithItem = [...result.messages].reverse().find(message => {
-                const itemId = String(message.item_id || '');
-                return itemId && itemId !== 'None' && !itemId.startsWith('auto_');
-            });
-            if (messageWithItem) {
-                chatCurrentItemId = messageWithItem.item_id;
-                updateChatHeaderMeta({ ...session, item_id: chatCurrentItemId });
-            }
-        }
-    } catch (error) {
-        console.debug('补充会话信息失败:', error);
-    }
 
     if (!document.getElementById('chatReplyPanel')?.classList.contains('d-none') && chatCurrentItemId) {
         await loadItemKeywords();
@@ -22223,8 +22307,19 @@ function shouldRebuildEmptySession(messages) {
     return false;
 }
 
-function renderChatEmptyState(session) {
-    return `<div class="text-center text-muted py-4"><div class="small">暂无消息记录</div></div>`;
+function renderChatEmptyState(session, hint = '暂无消息记录') {
+    const title = session?.source === 'remote_im' ? hint : (hint || '暂无消息记录');
+    return `<div class="text-center text-muted py-4"><div class="small">${escapeHtml(title)}</div></div>`;
+}
+
+function updateChatMessagePaging(result, messages) {
+    chatMessagesSource = result.source || 'local_cache';
+    chatMessagesNextCursor = result.next_cursor || null;
+    chatMessagesHasMore = Boolean(result.has_more && chatMessagesNextCursor);
+    if (chatMessagesSource === 'local_cache' && messages.length > 0) {
+        chatOldestMsgId = messages[0].id;
+        chatMessagesHasMore = Boolean(result.has_more && chatOldestMsgId);
+    }
 }
 
 async function loadChatMessages(append = false) {
@@ -22232,13 +22327,28 @@ async function loadChatMessages(append = false) {
     const area = document.getElementById('chatMessagesArea');
     if (!area) return;
     if (!append) {
+        chatMessagesNextCursor = null;
+        chatMessagesHasMore = false;
+        chatOldestMsgId = null;
         area.innerHTML = '<div class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm"></div></div>';
     }
 
     try {
-        let url = `${apiBase}/api/chat/messages?cookie_id=${encodeURIComponent(chatCurrentCookieId)}&chat_id=${encodeURIComponent(chatCurrentChatId)}&limit=50`;
-        if (append && chatOldestMsgId) {
-            url += `&before_id=${chatOldestMsgId}`;
+        let url = `${apiBase}/api/chat/messages?cookie_id=${encodeURIComponent(chatCurrentCookieId)}&chat_id=${encodeURIComponent(chatCurrentChatId)}&limit=40`;
+        if (chatCurrentItemId) {
+            url += `&item_id=${encodeURIComponent(chatCurrentItemId)}`;
+        }
+        if (append) {
+            if (chatMessagesSource === 'remote_im' && chatMessagesNextCursor) {
+                url += `&remote=true&cursor=${encodeURIComponent(chatMessagesNextCursor)}`;
+            } else if (chatMessagesSource === 'local_cache' && chatOldestMsgId) {
+                url += `&remote=false&before_id=${encodeURIComponent(chatOldestMsgId)}`;
+            } else {
+                showToast('没有更多消息了', 'info');
+                return;
+            }
+        } else {
+            url += '&remote=true';
         }
         const result = await fetchJSON(url);
         if (!result.success) {
@@ -22246,19 +22356,39 @@ async function loadChatMessages(append = false) {
             return;
         }
         const messages = result.messages || [];
-        if (messages.length > 0) {
-            chatOldestMsgId = messages[0].id;
+        updateChatMessagePaging(result, messages);
+
+        const buyerMessage = messages.find(message => message.direction === 2);
+        if (buyerMessage && !chatCurrentToUserId) {
+            chatCurrentToUserId = buyerMessage.sender_id;
         }
+        const messageWithItem = [...messages].reverse().find(message => {
+            const itemId = String(message.item_id || '');
+            return itemId && itemId !== 'None' && !itemId.startsWith('auto_');
+        });
+        if (messageWithItem && !chatCurrentItemId) {
+            chatCurrentItemId = messageWithItem.item_id;
+            const currentSession = chatSessionsCache.find(item => item.chat_id === chatCurrentChatId) || {};
+            updateChatHeaderMeta({ ...currentSession, item_id: chatCurrentItemId });
+        }
+
         if (append) {
+            if (!messages.length) {
+                showToast('没有更多消息了', 'info');
+                return;
+            }
             const previousHeight = area.scrollHeight;
-            area.insertAdjacentHTML('afterbegin', renderChatMessages(messages));
+            area.querySelector('.chat-history-more')?.remove();
+            const moreButton = chatMessagesHasMore ? '<button type="button" class="chat-history-more" onclick="loadMoreChatMessages()"><i class="bi bi-clock-history"></i><span>加载更早消息</span></button>' : '';
+            area.insertAdjacentHTML('afterbegin', `${moreButton}${renderChatMessages(messages)}`);
             area.scrollTop = area.scrollHeight - previousHeight;
         } else {
             if (messages.length) {
-                area.innerHTML = renderChatMessages(messages);
+                const moreButton = chatMessagesHasMore ? '<button type="button" class="chat-history-more" onclick="loadMoreChatMessages()"><i class="bi bi-clock-history"></i><span>加载更早消息</span></button>' : '';
+                area.innerHTML = `${moreButton}${renderChatMessages(messages)}`;
             } else {
                 const currentSession = chatSessionsCache.find(item => item.chat_id === chatCurrentChatId) || {};
-                area.innerHTML = renderChatEmptyState(currentSession);
+                area.innerHTML = renderChatEmptyState(currentSession, result.remote_error || '暂无消息记录');
             }
             area.scrollTop = area.scrollHeight;
         }

@@ -3367,6 +3367,325 @@ def _merge_chat_sessions_with_order_fallback(
     return merged[:limit]
 
 
+def _clean_goofish_id(value: Any) -> str:
+    text = str(value or '').strip()
+    if '@' in text:
+        text = text.split('@')[0]
+    return text.strip()
+
+
+def _is_valid_chat_display_name(value: Any) -> bool:
+    text = str(value or '').strip()
+    if not text or text in {'未知用户', '工作台通知', '订单', '交易消息', '买家', '全部'}:
+        return False
+    if text.isdigit():
+        return False
+    invalid_markers = (
+        '待付款', '待发货', '已发货', '拍下', '付款', '发货', '收货',
+        '退款', '评价', '交易', '关闭', '确认', '小红花', '等待'
+    )
+    return not any(marker in text for marker in invalid_markers)
+
+
+def _decode_remote_custom_payload(custom_data: Any) -> Dict[str, Any]:
+    raw = str(custom_data or '').strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(base64.b64decode(raw).decode('utf-8'))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _extract_remote_message_summary(message: Dict[str, Any]) -> str:
+    if not isinstance(message, dict):
+        return ''
+    content = message.get('content', {}) if isinstance(message.get('content'), dict) else {}
+    custom = content.get('custom', {}) if isinstance(content.get('custom'), dict) else {}
+    summary = str(custom.get('summary') or '').strip()
+    if summary:
+        return summary[:80]
+
+    payload = _decode_remote_custom_payload(custom.get('data'))
+    if payload:
+        content_type = payload.get('contentType')
+        text_obj = payload.get('text')
+        if isinstance(text_obj, dict):
+            text_value = str(text_obj.get('text') or '').strip()
+            if text_value:
+                return text_value[:80]
+        elif text_obj:
+            return str(text_obj).strip()[:80]
+        if content_type == 2 or payload.get('image') or payload.get('picUrl'):
+            return '[图片]'
+        if content_type == 3 or payload.get('audio'):
+            return '[语音消息]'
+        for key in ('title', 'template', 'content'):
+            value = str(payload.get(key) or '').strip()
+            if value:
+                return value[:80]
+
+    degrade = str(custom.get('degrade') or '').strip()
+    if degrade:
+        return degrade[:80]
+    return ''
+
+
+def _normalize_remote_conversation_session(raw_item: Dict[str, Any], owner_user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw_item, dict):
+        return None
+    try:
+        conv = raw_item.get('singleChatUserConversation', raw_item)
+        if not isinstance(conv, dict):
+            return None
+        single_conv = conv.get('singleChatConversation', {}) if isinstance(conv.get('singleChatConversation'), dict) else {}
+        raw_cid = str(single_conv.get('cid') or '').strip()
+        chat_id = _clean_goofish_id(raw_cid)
+        if not chat_id:
+            return None
+
+        owner_id = _clean_goofish_id(owner_user_id)
+        pair_first = _clean_goofish_id(single_conv.get('pairFirst'))
+        pair_second = _clean_goofish_id(single_conv.get('pairSecond'))
+        other_user_id = pair_second if pair_first == owner_id else pair_first
+        if not other_user_id or other_user_id == '0':
+            return None
+
+        ext = _safe_json_loads(single_conv.get('extension'))
+        last_msg_obj = conv.get('lastMessage', {}) if isinstance(conv.get('lastMessage'), dict) else {}
+        last_message = last_msg_obj.get('message', {}) if isinstance(last_msg_obj.get('message'), dict) else {}
+        last_ext = _safe_json_loads(last_message.get('extension'))
+        last_sender_id = _clean_goofish_id(last_ext.get('senderUserId'))
+
+        name_candidates = []
+        if last_sender_id == other_user_id:
+            name_candidates.append(last_ext.get('reminderTitle'))
+        name_candidates.extend([
+            ext.get('buyerNick'), ext.get('otherUserNick'), ext.get('targetNick'),
+            ext.get('fishNick'), ext.get('nickName'), ext.get('nick'),
+        ])
+        other_user_name = ''
+        for candidate in name_candidates:
+            if _is_valid_chat_display_name(candidate):
+                other_user_name = str(candidate).strip()
+                break
+
+        created_at = _format_history_created_at(
+            conv.get('modifyTime')
+            or last_message.get('createAt')
+            or last_message.get('time')
+            or last_msg_obj.get('createTime')
+        )
+        item_title = str(ext.get('itemTitle') or ext.get('title') or '').strip()
+        item_id = str(ext.get('itemId') or ext.get('item_id') or '').strip()
+        summary = _extract_remote_message_summary(last_message)
+
+        return {
+            'chat_id': chat_id,
+            'raw_cid': raw_cid or f'{chat_id}@goofish',
+            'sender_id': other_user_id,
+            'buyer_id': other_user_id,
+            'sender_name': other_user_name or other_user_id or chat_id,
+            'buyer_name': other_user_name,
+            'content': summary,
+            'content_type': 1,
+            'item_id': item_id,
+            'item_title': item_title,
+            'direction': 1 if last_sender_id and last_sender_id == owner_id else 2,
+            'created_at': created_at or '',
+            'unread_count': conv.get('redPoint') or 0,
+            'source': 'remote_im',
+        }
+    except Exception as e:
+        logger.debug(f"远程IM会话解析失败: {mask_sensitive_text(e)}")
+        return None
+
+
+def _merge_chat_session_sources(*sources: List[Dict[str, Any]], limit: int = 100) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen_chat_ids = set()
+    for source in sources:
+        for session in source or []:
+            chat_id = str(session.get('chat_id') or '').strip()
+            if not chat_id or chat_id in seen_chat_ids:
+                continue
+            merged.append(session)
+            seen_chat_ids.add(chat_id)
+    merged.sort(key=lambda item: str(item.get('created_at') or ''), reverse=True)
+    return merged[:limit]
+
+
+def _remote_message_model_to_history_raw(model: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(model, dict):
+        return None
+    message = model.get('message', {}) if isinstance(model.get('message'), dict) else {}
+    extension = _safe_json_loads(message.get('extension'))
+    content = message.get('content', {}) if isinstance(message.get('content'), dict) else {}
+    custom = content.get('custom', {}) if isinstance(content.get('custom'), dict) else {}
+    parsed_message = _decode_remote_custom_payload(custom.get('data'))
+    if not parsed_message:
+        summary = str(custom.get('summary') or custom.get('degrade') or '').strip()
+        parsed_message = {'1': {'10': {'reminderContent': summary}}} if summary else {'raw': custom.get('data') or ''}
+
+    created_at = None
+    for candidate in (
+        model.get('createTime'), model.get('gmtCreate'), model.get('createdAt'),
+        model.get('messageTime'), model.get('sendTime'), model.get('timestamp'),
+        message.get('createAt'), message.get('time'), extension.get('createTime')
+    ):
+        if candidate not in (None, '', 0, '0'):
+            created_at = candidate
+            break
+
+    return {
+        'send_user_id': _clean_goofish_id(extension.get('senderUserId')),
+        'send_user_name': extension.get('senderNick') or extension.get('reminderTitle') or '',
+        'message': parsed_message,
+        'message_extension': extension,
+        'created_at': created_at,
+    }
+
+
+def _normalize_remote_message_model_record(
+    model: Dict[str, Any],
+    cookie_id: str,
+    chat_id: str,
+    owner_user_id: Optional[str],
+    fallback_item_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(model, dict):
+        return None
+    message = model.get('message', {}) if isinstance(model.get('message'), dict) else {}
+    extension = _safe_json_loads(message.get('extension'))
+    content = message.get('content', {}) if isinstance(message.get('content'), dict) else {}
+    custom = content.get('custom', {}) if isinstance(content.get('custom'), dict) else {}
+    payload = _decode_remote_custom_payload(custom.get('data'))
+
+    if payload and '1' in payload:
+        raw = _remote_message_model_to_history_raw(model)
+        if raw:
+            return _normalize_chat_history_message_record(
+                raw,
+                cookie_id=cookie_id,
+                chat_id=chat_id,
+                owner_user_id=owner_user_id,
+                fallback_item_id=fallback_item_id,
+            )
+
+    sender_id = _clean_goofish_id(extension.get('senderUserId'))
+    sender_name = (
+        str(extension.get('senderNick') or '').strip()
+        or str(extension.get('reminderTitle') or '').strip()
+        or sender_id
+        or chat_id
+    )
+    content_type = 1
+    text = ''
+    image_url = None
+    media_url = None
+    link_url = None
+    extra_json = None
+
+    if payload:
+        payload_content_type = payload.get('contentType')
+        try:
+            payload_content_type = int(payload_content_type or 1)
+        except (TypeError, ValueError):
+            payload_content_type = 1
+
+        text_obj = payload.get('text')
+        if payload_content_type == 1 and text_obj is not None:
+            text = str(text_obj.get('text') if isinstance(text_obj, dict) else text_obj).strip()
+        elif payload_content_type == 2 or isinstance(payload.get('image'), dict) or payload.get('picUrl'):
+            content_type = 2
+            pics = (payload.get('image') or {}).get('pics') if isinstance(payload.get('image'), dict) else []
+            if pics:
+                image_url = str((pics[0] or {}).get('url') or '').strip() or None
+            image_url = image_url or str(payload.get('picUrl') or '').strip() or None
+            text = '[图片]'
+        elif payload_content_type == 3 or payload.get('audio'):
+            text = '[语音消息]'
+        else:
+            text = str(
+                payload.get('title')
+                or payload.get('template')
+                or payload.get('content')
+                or payload.get('summary')
+                or ''
+            ).strip()
+            if payload.get('targetUrl') or payload.get('url'):
+                content_type = 4
+                link_url = str(payload.get('targetUrl') or payload.get('url') or '').strip() or None
+        if payload and content_type in {4, 5, 6}:
+            extra_json = json.dumps({'payload': payload}, ensure_ascii=False)
+
+    if not text:
+        text = str(custom.get('summary') or custom.get('degrade') or extension.get('reminderContent') or '').strip()
+    if not text:
+        text = '[系统消息]'
+
+    created_at = None
+    for candidate in (
+        model.get('createTime'), model.get('gmtCreate'), model.get('createdAt'),
+        model.get('messageTime'), model.get('sendTime'), model.get('timestamp'),
+        message.get('createAt'), message.get('time'), extension.get('createTime')
+    ):
+        if candidate not in (None, '', 0, '0'):
+            created_at = candidate
+            break
+
+    owner_id = _clean_goofish_id(owner_user_id)
+    return {
+        'cookie_id': cookie_id,
+        'chat_id': chat_id,
+        'sender_id': sender_id,
+        'sender_name': sender_name,
+        'content': text,
+        'content_type': content_type,
+        'image_url': image_url,
+        'item_id': fallback_item_id,
+        'direction': 1 if sender_id and owner_id and sender_id == owner_id else 2,
+        'reply_source': None,
+        'media_url': media_url,
+        'link_url': link_url,
+        'extra_json': extra_json,
+        'created_at': _format_history_created_at(created_at),
+    }
+
+
+def _normalize_remote_messages_page(
+    body: Dict[str, Any],
+    cookie_id: str,
+    chat_id: str,
+    owner_user_id: Optional[str],
+    fallback_item_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    messages: List[Dict[str, Any]] = []
+    if not isinstance(body, dict):
+        return messages
+    for model in body.get('userMessageModels', []) or []:
+        record = _normalize_remote_message_model_record(
+            model,
+            cookie_id=cookie_id,
+            chat_id=chat_id,
+            owner_user_id=owner_user_id,
+            fallback_item_id=fallback_item_id,
+        )
+        if record:
+            message_id = (
+                ((model.get('message') or {}).get('id') if isinstance(model.get('message'), dict) else None)
+                or model.get('messageId')
+                or model.get('msgId')
+                or f"remote_{len(messages)}"
+            )
+            record['id'] = message_id
+            record['remote'] = True
+            messages.append(record)
+    messages.reverse()
+    return messages
+
+
 def _annotate_chat_sessions(cookie_id: str, sessions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     annotated = []
     for session in sessions or []:
@@ -3388,6 +3707,21 @@ def _ensure_cookie_access(cid: str, current_user: Dict[str, Any]) -> str:
     if cleaned_cid not in user_cookies:
         raise HTTPException(status_code=403, detail="无权限操作该Cookie")
     return cleaned_cid
+
+
+def _get_chat_live_instance(cookie_id: str):
+    live_instance = None
+    try:
+        from XianyuAutoAsync import XianyuLive
+        live_instance = XianyuLive.get_instance(cookie_id)
+    except Exception:
+        live_instance = None
+    if not live_instance:
+        try:
+            live_instance = getattr(cookie_manager.manager, 'live_instances', {}).get(cookie_id) if cookie_manager.manager else None
+        except Exception:
+            live_instance = None
+    return live_instance
 
 
 def _normalize_runtime_timestamp(value: Any) -> Optional[float]:
@@ -13150,30 +13484,144 @@ def stream_user_orders(current_user: Dict[str, Any] = Depends(get_current_user))
     )
 
 
+@app.post('/api/chat/connect/{cid}')
+async def connect_chat_account(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """连接账号监听，供在线客服显式连接按钮使用。"""
+    if cookie_manager.manager is None:
+        raise HTTPException(status_code=500, detail='CookieManager 未就绪')
+    try:
+        cid = _ensure_cookie_access(cid, current_user)
+        user_cookies = _get_user_cookies_map(current_user)
+        cookie_value = user_cookies.get(cid) or db_manager.get_cookie(cid)
+        if not cookie_value:
+            raise HTTPException(status_code=400, detail='账号Cookie不存在')
+
+        manager = cookie_manager.manager
+        is_enabled = manager.get_cookie_status(cid)
+        task = getattr(manager, 'tasks', {}).get(cid)
+        if not is_enabled:
+            manager.update_cookie_status(cid, True)
+        elif not task or task.done():
+            manager.add_cookie(cid, cookie_value, user_id=current_user.get('user_id'))
+
+        return {
+            'success': True,
+            'message': '连接已启动',
+            'cookie_id': cid,
+            'runtime_status': _build_live_runtime_status(cid),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"在线客服连接账号失败: {cid} - {mask_sensitive_text(e)}")
+        raise HTTPException(status_code=400, detail=safe_client_error('连接账号失败，请稍后重试'))
+
+
+@app.post('/api/chat/disconnect/{cid}')
+async def disconnect_chat_account(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """断开账号监听，供在线客服显式断开按钮使用。"""
+    if cookie_manager.manager is None:
+        raise HTTPException(status_code=500, detail='CookieManager 未就绪')
+    try:
+        cid = _ensure_cookie_access(cid, current_user)
+        cookie_manager.manager.update_cookie_status(cid, False)
+        return {
+            'success': True,
+            'message': '已断开连接',
+            'cookie_id': cid,
+            'runtime_status': _build_live_runtime_status(cid),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"在线客服断开账号失败: {cid} - {mask_sensitive_text(e)}")
+        raise HTTPException(status_code=400, detail=safe_client_error('断开账号失败，请稍后重试'))
+
+
 @app.get('/api/chat/sessions')
 async def get_chat_sessions(
     cookie_id: str = None,
     include_order_fallback: bool = True,
     limit: int = 100,
+    cursor: Optional[int] = None,
+    remote: bool = True,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """获取指定账号的会话列表"""
+    """获取指定账号的会话列表，优先直连IM，失败时回退本地缓存。"""
     try:
         if not cookie_id:
             raise HTTPException(status_code=400, detail="缺少 cookie_id 参数")
         cookie_id = _ensure_cookie_access(cookie_id, current_user)
-        sessions = db_manager.get_chat_sessions(cookie_id, limit=min(limit, 200))
-        logger.info(
-            f"获取聊天会话列表: cookie_id={cookie_id}, local_sessions={len(sessions)}, include_order_fallback={include_order_fallback}, limit={limit}"
-        )
-        if include_order_fallback:
-            fallback_sessions = _build_chat_sessions_from_recent_orders(cookie_id, limit=min(max(limit, 50), 300))
-            logger.info(f"聊天会话列表订单兜底结果: cookie_id={cookie_id}, fallback_sessions={len(fallback_sessions)}")
-            sessions = _merge_chat_sessions_with_order_fallback(sessions, fallback_sessions, limit=min(max(limit, 50), 300))
-            logger.info(f"聊天会话列表合并结果: cookie_id={cookie_id}, merged_sessions={len(sessions)}")
+        normalized_limit = max(1, min(int(limit or 100), 200))
+        runtime_status = _build_live_runtime_status(cookie_id)
+        remote_sessions: List[Dict[str, Any]] = []
+        remote_error = None
+        has_more = False
+        next_cursor = None
+        source = 'local_cache'
+
+        if remote:
+            live_instance = _get_chat_live_instance(cookie_id)
+            if live_instance:
+                owner_user_id = _clean_goofish_id(getattr(live_instance, 'myid', None))
+                try:
+                    body = await _run_live_instance_on_manager_loop(
+                        cookie_id,
+                        lambda: live_instance.list_newest_conversations(
+                            start_timestamp=cursor,
+                            limit=min(normalized_limit, 100),
+                        ),
+                        timeout=40,
+                    )
+                    if isinstance(body, dict) and (body.get('reason') or body.get('code')) and not body.get('userConvs'):
+                        error_code = str(body.get('code') or '')
+                        remote_error = '请求过于频繁，请稍后再试' if error_code == '400600001' else (body.get('reason') or body.get('developerMessage') or error_code)
+                    else:
+                        for item in (body.get('userConvs', []) if isinstance(body, dict) else []):
+                            session = _normalize_remote_conversation_session(item, owner_user_id=owner_user_id)
+                            if session:
+                                remote_sessions.append(session)
+                        raw_has_more = body.get('hasMore') if isinstance(body, dict) else False
+                        has_more = raw_has_more if isinstance(raw_has_more, bool) else raw_has_more == 1
+                        next_cursor = body.get('nextCursor') if isinstance(body, dict) else None
+                        source = 'remote_im'
+                except HTTPException as remote_exc:
+                    remote_error = str(remote_exc.detail)
+                except Exception as remote_exc:
+                    remote_error = safe_client_error('直连IM会话拉取失败，已使用本地缓存')
+                    logger.warning(f"直连IM会话拉取失败: cookie_id={cookie_id}, error={mask_sensitive_text(remote_exc)}")
+            else:
+                remote_error = '账号未连接，请先连接'
+
+        if cursor is not None:
+            sessions = remote_sessions
+        else:
+            local_sessions = db_manager.get_chat_sessions(cookie_id, limit=min(normalized_limit, 200))
+            logger.info(
+                f"获取聊天会话列表: cookie_id={cookie_id}, remote_sessions={len(remote_sessions)}, "
+                f"local_sessions={len(local_sessions)}, include_order_fallback={include_order_fallback}, limit={normalized_limit}"
+            )
+            fallback_sessions = []
+            if include_order_fallback:
+                fallback_sessions = _build_chat_sessions_from_recent_orders(cookie_id, limit=min(max(normalized_limit, 50), 300))
+            sessions = _merge_chat_session_sources(
+                remote_sessions,
+                local_sessions,
+                fallback_sessions,
+                limit=min(max(normalized_limit, 50), 300),
+            )
+
         sessions = _annotate_chat_sessions(cookie_id, sessions)
-        sessions = await _enrich_chat_sessions(cookie_id, sessions, limit=min(max(limit, 20), 30))
-        return {'success': True, 'sessions': sessions}
+        sessions = await _enrich_chat_sessions(cookie_id, sessions, limit=min(max(normalized_limit, 20), 30))
+        return {
+            'success': True,
+            'sessions': sessions,
+            'source': source,
+            'remote_error': remote_error,
+            'has_more': has_more,
+            'next_cursor': next_cursor,
+            'runtime_status': runtime_status,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -13187,15 +13635,71 @@ async def get_chat_messages(
     chat_id: str = None,
     limit: int = 50,
     before_id: int = None,
+    cursor: Optional[int] = None,
+    remote: bool = True,
+    item_id: Optional[str] = None,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """获取指定会话的消息列表（仅读本地 DB，新消息走 /api/chat/stream 实时推送）"""
+    """获取指定会话消息，优先直连IM分页，失败时回退本地DB。"""
     try:
         if not cookie_id or not chat_id:
             raise HTTPException(status_code=400, detail="缺少 cookie_id 或 chat_id 参数")
         cookie_id = _ensure_cookie_access(cookie_id, current_user)
-        messages = db_manager.get_chat_messages(cookie_id, chat_id, limit=min(limit, 100), before_id=before_id)
-        return {'success': True, 'messages': messages}
+        normalized_limit = max(1, min(int(limit or 50), 100))
+        normalized_chat_id = _clean_goofish_id(chat_id)
+        remote_error = None
+
+        if remote and before_id is None:
+            live_instance = _get_chat_live_instance(cookie_id)
+            if live_instance:
+                owner_user_id = _clean_goofish_id(getattr(live_instance, 'myid', None))
+                try:
+                    body = await _run_live_instance_on_manager_loop(
+                        cookie_id,
+                        lambda: live_instance.list_conversation_messages_page(
+                            normalized_chat_id,
+                            start_timestamp=cursor,
+                            limit=normalized_limit,
+                        ),
+                        timeout=40,
+                    )
+                    if isinstance(body, dict) and (body.get('reason') or body.get('code')) and not body.get('userMessageModels'):
+                        remote_error = body.get('reason') or body.get('developerMessage') or body.get('code')
+                    else:
+                        messages = _normalize_remote_messages_page(
+                            body if isinstance(body, dict) else {},
+                            cookie_id=cookie_id,
+                            chat_id=normalized_chat_id,
+                            owner_user_id=owner_user_id,
+                            fallback_item_id=item_id,
+                        )
+                        raw_has_more = body.get('hasMore') if isinstance(body, dict) else False
+                        has_more = raw_has_more if isinstance(raw_has_more, bool) else raw_has_more == 1
+                        return {
+                            'success': True,
+                            'messages': messages,
+                            'source': 'remote_im',
+                            'remote_error': None,
+                            'has_more': has_more,
+                            'next_cursor': body.get('nextCursor') if isinstance(body, dict) else None,
+                        }
+                except HTTPException as remote_exc:
+                    remote_error = str(remote_exc.detail)
+                except Exception as remote_exc:
+                    remote_error = safe_client_error('直连IM消息拉取失败，已使用本地缓存')
+                    logger.warning(f"直连IM消息拉取失败: cookie_id={cookie_id}, chat_id={normalized_chat_id}, error={mask_sensitive_text(remote_exc)}")
+            else:
+                remote_error = '账号未连接，请先连接'
+
+        messages = db_manager.get_chat_messages(cookie_id, normalized_chat_id, limit=normalized_limit, before_id=before_id)
+        return {
+            'success': True,
+            'messages': messages,
+            'source': 'local_cache',
+            'remote_error': remote_error,
+            'has_more': bool(messages) and len(messages) >= normalized_limit,
+            'next_cursor': None,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -13324,11 +13828,19 @@ def get_chat_accounts(current_user: Dict[str, Any] = Depends(get_current_user)):
             status = _build_live_runtime_status(cid)
             detail = db_manager.get_cookie_details(cid) or {}
             display_name = detail.get('remark') or detail.get('username') or cid
+            enabled = db_manager.get_cookie_status(cid)
+            connected = bool(status and status.get('connection_state') == 'connected')
             accounts.append({
                 'id': cid,
                 'name': display_name,
-                'enabled': db_manager.get_cookie_status(cid),
-                'connected': status.get('connection_state') == 'connected' if status else False,
+                'enabled': enabled,
+                'running': bool(status and status.get('running')),
+                'connected': connected,
+                'connection_state': status.get('connection_state') if status else 'not_running',
+                'message_stream_ready': bool(status and status.get('message_stream_ready')),
+                'message_stream_status': status.get('message_stream_status') if status else 'not_running',
+                'message_stream_note': status.get('message_stream_note') if status else None,
+                'runtime_status': status,
             })
         return {'success': True, 'accounts': accounts}
     except Exception as e:
