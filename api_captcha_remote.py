@@ -39,9 +39,78 @@ class MouseEvent(BaseModel):
     y: int
 
 
+class SliderSolveRequest(BaseModel):
+    """远程过滑块请求。"""
+    secret_key: str
+    url: str
+    account_id: str = "external"
+    browser_timeout: int = 60
+    show_browser: bool = False
+
+
 class SessionCheckRequest(BaseModel):
     """会话检查请求"""
     session_id: str
+
+
+# =============================================================================
+# 远程过滑块接口
+# =============================================================================
+
+@router.post("/slider-solve")
+async def slider_solve(request: SliderSolveRequest):
+    """远程过滑块服务端接口。
+
+    需要配置环境变量 XY_SLIDER_REMOTE_SECRET；调用方传入相同 secret_key 后，
+    服务端使用本机 Playwright + DrissionPage 兜底处理 punish 链接。
+    """
+    configured_secret = os.environ.get("XY_SLIDER_REMOTE_SECRET", "").strip()
+    if not configured_secret:
+        return {"success": False, "message": "远程过滑块服务未启用：缺少 XY_SLIDER_REMOTE_SECRET", "data": None}
+    if not request.secret_key or request.secret_key != configured_secret:
+        return {"success": False, "message": "无效的秘钥", "data": None}
+
+    target_url = str(request.url or "").strip()
+    if not target_url:
+        return {"success": False, "message": "punish 链接不能为空", "data": None}
+    if not target_url.lower().startswith(("http://", "https://")):
+        return {"success": False, "message": "punish 链接必须以 http:// 或 https:// 开头", "data": None}
+
+    try:
+        from utils.xianyu_slider_stealth import XianyuSliderStealth
+        from utils.slider_orchestrator import run_slider_async_with_fallback
+
+        account_id = str(request.account_id or "external").strip() or "external"
+        slider = XianyuSliderStealth(
+            user_id=account_id,
+            enable_learning=True,
+            headless=not bool(request.show_browser),
+        )
+        result = await run_slider_async_with_fallback(
+            slider,
+            target_url,
+            engine="playwright",
+            remote_enabled=False,  # 防止远程接口指回本机时递归调用
+            remote_timeout=max(20, min(int(request.browser_timeout or 60), 180)),
+        )
+        if result.success:
+            return {
+                "success": True,
+                "message": result.message,
+                "data": {
+                    "engine": result.engine,
+                    "cookies": result.cookies,
+                    "x5_cookies": result.x5_cookies,
+                },
+            }
+        return {
+            "success": False,
+            "message": result.message,
+            "data": {"engine": result.engine, "x5_cookies": result.x5_cookies},
+        }
+    except Exception as exc:
+        logger.error(f"远程过滑块失败: {exc}")
+        return {"success": False, "message": f"过滑块失败: {exc}", "data": None}
 
 
 # =============================================================================

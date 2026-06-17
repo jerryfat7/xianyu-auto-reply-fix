@@ -80,6 +80,38 @@ class SliderOrchestratorTest(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.cookies["x5sec"], "ticket")
         self.assertEqual(result.x5_cookies, {"x5sec": "ticket"})
+    def test_remote_solver_runs_before_local_slider_when_configured(self):
+        class _PrimarySlider:
+            user_id = "remote_user"
+            initial_cookies = "unb=remote_user; cookie2=old"
+            headless = True
+
+            def run(self, *_args, **_kwargs):
+                raise AssertionError("remote success should short-circuit local slider")
+
+        class _FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "success": True,
+                    "data": {"cookies": {"unb": "remote_user", "x5sec": "remote_ticket"}},
+                }
+
+        with mock.patch("utils.slider_orchestrator.requests.post", return_value=_FakeResponse()) as post_mock:
+            result = run_slider_with_fallback(
+                _PrimarySlider(),
+                "https://example.com/punish?action=captcha",
+                remote_enabled=True,
+                remote_config=("https://remote.example/api/captcha/slider-solve", "secret"),
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.engine, "remote")
+        self.assertEqual(result.x5_cookies, {"x5sec": "remote_ticket"})
+        self.assertEqual(post_mock.call_args.kwargs["json"]["secret_key"], "secret")
+
     def test_drissionpage_fallback_can_recover_primary_failure(self):
         class _PrimarySlider:
             user_id = "fallback_user"
