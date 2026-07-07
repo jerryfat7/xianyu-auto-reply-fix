@@ -184,8 +184,8 @@ docker compose up -d
 
 <a href="https://www.star-history.com/#GuDong2003/xianyu-auto-reply-fix&Date">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=GuDong2003/xianyu-auto-reply-fix&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=GuDong2003/xianyu-auto-reply-fix&type=Date" />
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=GuDong2003/xianyu-auto-reply-fix&type=Date" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=GuDong2003/xianyu-auto-reply-fix&type=Date&theme=dark&sealed_token=P3o8nIGCB4Y4KGlfZogILPfgp0REbjEcS8s8BScY9WUcxbgx9b9JK_2HPPn7pF39I703tgOcIWPx-4RI5Zfsd0VBVLRc6AIKpKgDOekOySsw7T5-BWZHBA" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=GuDong2003/xianyu-auto-reply-fix&type=Date&sealed_token=P3o8nIGCB4Y4KGlfZogILPfgp0REbjEcS8s8BScY9WUcxbgx9b9JK_2HPPn7pF39I703tgOcIWPx-4RI5Zfsd0VBVLRc6AIKpKgDOekOySsw7T5-BWZHBA" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=GuDong2003/xianyu-auto-reply-fix&type=Date&sealed_token=P3o8nIGCB4Y4KGlfZogILPfgp0REbjEcS8s8BScY9WUcxbgx9b9JK_2HPPn7pF39I703tgOcIWPx-4RI5Zfsd0VBVLRc6AIKpKgDOekOySsw7T5-BWZHBA" />
   </picture>
 </a>
