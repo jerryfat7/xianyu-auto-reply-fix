@@ -1082,6 +1082,7 @@ Cookie数量: {cookie_count}
             self._ensure_scheduled_red_flower_logs_table(cursor)
             self._ensure_scheduled_task_logs_table(cursor)
             self._ensure_product_publish_tables(cursor)
+            self._ensure_inventory_tables(cursor)
 
             # 迁移notification_templates表以支持新的模板类型
             self._migrate_notification_templates(cursor)
@@ -6626,6 +6627,7 @@ Cookie数量: {cookie_count}
                         item_category = item_data.get('item_category', '')
                         item_price = item_data.get('item_price', '')
                         item_detail = item_data.get('item_detail', '')
+                        is_multi_spec = item_data.get('is_multi_spec')
 
                         if not cookie_id or not item_id:
                             continue
@@ -6636,22 +6638,31 @@ Cookie数量: {cookie_count}
                             continue
 
                         # 使用 INSERT OR IGNORE + UPDATE 模式
-                        cursor.execute('''
-                        INSERT OR IGNORE INTO item_info (cookie_id, item_id, item_title, item_description,
-                                                       item_category, item_price, item_detail, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                        ''', (cookie_id, item_id, item_title, item_description,
-                              item_category, item_price, item_detail))
+                        fields = ['cookie_id', 'item_id', 'item_title', 'item_description',
+                                  'item_category', 'item_price', 'item_detail', 'created_at', 'updated_at']
+                        values = [cookie_id, item_id, item_title, item_description,
+                                  item_category, item_price, item_detail, 'CURRENT_TIMESTAMP', 'CURRENT_TIMESTAMP']
+                        if is_multi_spec is not None:
+                            fields.append('is_multi_spec')
+                            values.append(is_multi_spec)
+                        ph = ', '.join(['?'] * len([v for v in values if v != 'CURRENT_TIMESTAMP']))
+                        cursor.execute(f"INSERT OR IGNORE INTO item_info ({', '.join(fields)}) VALUES ({ph}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                                       tuple(v for v in values if v != 'CURRENT_TIMESTAMP'))
 
                         if cursor.rowcount == 0:
                             # 记录已存在，进行条件更新
-                            update_sql = '''
+                            extra = ''
+                            extra_params = []
+                            if is_multi_spec is not None:
+                                extra = ', is_multi_spec = ?'
+                                extra_params = [is_multi_spec]
+                            update_sql = f'''
                             UPDATE item_info SET
                                 item_title = CASE WHEN (item_title IS NULL OR item_title = '') AND ? != '' THEN ? ELSE item_title END,
                                 item_description = CASE WHEN (item_description IS NULL OR item_description = '') AND ? != '' THEN ? ELSE item_description END,
                                 item_category = CASE WHEN (item_category IS NULL OR item_category = '') AND ? != '' THEN ? ELSE item_category END,
                                 item_price = CASE WHEN (item_price IS NULL OR item_price = '') AND ? != '' THEN ? ELSE item_price END,
-                                item_detail = CASE WHEN (item_detail IS NULL OR item_detail = '' OR TRIM(item_detail) = '') AND ? != '' THEN ? ELSE item_detail END,
+                                item_detail = CASE WHEN (item_detail IS NULL OR item_detail = '' OR TRIM(item_detail) = '') AND ? != '' THEN ? ELSE item_detail END{extra},
                                 updated_at = CURRENT_TIMESTAMP
                             WHERE cookie_id = ? AND item_id = ?
                             '''
@@ -6661,6 +6672,7 @@ Cookie数量: {cookie_count}
                                 item_category, item_category,
                                 item_price, item_price,
                                 item_detail, item_detail,
+                                *extra_params,
                                 cookie_id, item_id
                             ))
 
@@ -6709,27 +6721,26 @@ Cookie数量: {cookie_count}
                         item_title = item_data.get('item_title', '')
                         item_price = item_data.get('item_price', '')
                         item_category = item_data.get('item_category', '')
-                        
+                        item_detail = item_data.get('item_detail')
+                        is_multi_spec = item_data.get('is_multi_spec')
+
                         if not cookie_id or not item_id:
                             continue
-                        
-                        # 只更新标题、价格和分类，不更新商品详情
-                        update_sql = '''
-                        UPDATE item_info SET
-                            item_title = ?,
-                            item_price = ?,
-                            item_category = ?,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE cookie_id = ? AND item_id = ?
-                        '''
-                        cursor.execute(update_sql, (
-                            item_title,
-                            item_price,
-                            item_category,
-                            cookie_id,
-                            item_id
-                        ))
-                        
+
+                        # 更新标题、价格、分类，以及可选的详情和多规格标记
+                        fields = ["item_title = ?", "item_price = ?", "item_category = ?", "updated_at = CURRENT_TIMESTAMP"]
+                        params = [item_title, item_price, item_category]
+                        if item_detail is not None:
+                            fields.append("item_detail = ?")
+                            params.append(item_detail)
+                        if is_multi_spec is not None:
+                            fields.append("is_multi_spec = ?")
+                            params.append(is_multi_spec)
+                        params.extend([cookie_id, item_id])
+
+                        update_sql = f"UPDATE item_info SET {', '.join(fields)} WHERE cookie_id = ? AND item_id = ?"
+                        cursor.execute(update_sql, params)
+
                         if cursor.rowcount > 0:
                             success_count += 1
                     
@@ -11256,6 +11267,713 @@ Cookie数量: {cookie_count}
 
 
 # 全局单例
+    # ============================================================
+    # 库存管理表
+    # ============================================================
+
+    def _ensure_inventory_tables(self, cursor):
+        """创建库存管理相关表（Phase 2）。"""
+        self._execute_sql(cursor, '''
+        CREATE TABLE IF NOT EXISTS inventory_boxes (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            label       TEXT NOT NULL,
+            box_type    TEXT DEFAULT '',
+            ip_tags     TEXT DEFAULT '*',
+            cat_tags    TEXT DEFAULT '*',
+            capacity    INTEGER,
+            is_full     INTEGER DEFAULT 0,
+            barcode     TEXT UNIQUE,
+            location    TEXT DEFAULT '',
+            priority    INTEGER DEFAULT 0,
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_inventory_boxes_barcode ON inventory_boxes(barcode)")
+
+        self._execute_sql(cursor, '''
+        CREATE TABLE IF NOT EXISTS inventory_product_box (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id       TEXT NOT NULL,
+            box_id        INTEGER NOT NULL REFERENCES inventory_boxes(id) ON DELETE CASCADE,
+            label_printed INTEGER DEFAULT 0,
+            created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(item_id, box_id)
+        )
+        ''')
+        self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_inventory_product_box_item ON inventory_product_box(item_id)")
+        self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_inventory_product_box_box ON inventory_product_box(box_id)")
+
+        # SKU 父表
+        self._execute_sql(cursor, '''
+        CREATE TABLE IF NOT EXISTS item_parents (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id     TEXT UNIQUE NOT NULL,
+            title       TEXT,
+            images      TEXT,
+            props       TEXT,
+            cookie_id   TEXT,
+            status      TEXT DEFAULT 'active',
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_item_parents_cookie ON item_parents(cookie_id)")
+
+        # SKU 子表
+        self._execute_sql(cursor, '''
+        CREATE TABLE IF NOT EXISTS item_skus (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            parent_id   INTEGER NOT NULL REFERENCES item_parents(id) ON DELETE CASCADE,
+            sku_id      TEXT NOT NULL,
+            props_text  TEXT,
+            price       REAL,
+            stock       INTEGER DEFAULT 0,
+            status      TEXT DEFAULT 'active',
+            updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(parent_id, sku_id)
+        )
+        ''')
+        self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_item_skus_parent ON item_skus(parent_id)")
+
+        # 迁移: item_info → item_parents/item_skus（幂等）
+        self._migrate_items_to_sku(cursor)
+
+        self._execute_sql(cursor, '''
+        CREATE TABLE IF NOT EXISTS box_templates (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL,
+            ip_tags    TEXT DEFAULT '*',
+            cat_tags   TEXT DEFAULT '*',
+            box_type   TEXT DEFAULT '收纳箱',
+            capacity   INTEGER,
+            sort_order INTEGER DEFAULT 0
+        )
+        ''')
+
+        # 插入预置模板（幂等）
+        preset = [
+            ('吧唧小盒', '*', '吧唧,徽章,badge', '小盒', 40, 1),
+            ('IP吧唧盒', '待填', '吧唧,徽章', '小盒', 40, 2),
+            ('大收纳箱', '*', '*', '大箱', None, 3),
+            ('A4文件夹盒', '*', '文件夹,资料夹', '文件夹盒', 30, 4),
+        ]
+        for name, ip_tags, cat_tags, box_type, capacity, sort_order in preset:
+            cursor.execute(
+                "SELECT COUNT(*) FROM box_templates WHERE name = ?", (name,)
+            )
+            if cursor.fetchone()[0] == 0:
+                cursor.execute('''
+                    INSERT INTO box_templates (name, ip_tags, cat_tags, box_type, capacity, sort_order)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (name, ip_tags, cat_tags, box_type, capacity, sort_order))
+                logger.info(f"插入库存模板: {name}")
+
+        # 迁移：添加 is_default 列并创建兜底箱子
+        self._migrate_default_box(cursor)
+
+    def _migrate_default_box(self, cursor):
+        """添加 is_default 列，迁移/创建兜底箱子。"""
+        # 1. 添加列
+        try:
+            self._execute_sql(cursor, "SELECT is_default FROM inventory_boxes LIMIT 1")
+        except sqlite3.OperationalError:
+            self._execute_sql(cursor, "ALTER TABLE inventory_boxes ADD COLUMN is_default INTEGER DEFAULT 0")
+            logger.info("[兜底箱子] 添加 is_default 列")
+
+        # 2. 查找所有 */* 箱子
+        cursor.execute("SELECT id FROM inventory_boxes WHERE ip_tags='*' AND cat_tags='*' ORDER BY id ASC")
+        wildcards = [r[0] for r in cursor.fetchall()]
+        if wildcards:
+            # 第一个标记为默认，多余的合并后删除
+            default_id = wildcards[0]
+            cursor.execute("UPDATE inventory_boxes SET is_default=1, capacity=NULL WHERE id=?", (default_id,))
+            for extra_id in wildcards[1:]:
+                cursor.execute(
+                    "UPDATE OR IGNORE inventory_product_box SET box_id=? WHERE box_id=?",
+                    (default_id, extra_id)
+                )
+                cursor.execute("DELETE FROM inventory_boxes WHERE id=?", (extra_id,))
+            logger.info(f"[兜底箱子] id={default_id} 设为默认，合并 {len(wildcards)-1} 个额外箱子")
+        else:
+            # 3. 没有任何 */* 箱子，创建
+            cursor.execute(
+                "INSERT INTO inventory_boxes (label, ip_tags, cat_tags, capacity, is_default, priority) VALUES ('兜底箱子','*','*',NULL,1,0)"
+            )
+            logger.info("[兜底箱子] 创建系统默认兜底箱子")
+
+    # ---- 箱子 CRUD ----
+
+    def add_box(self, label: str, box_type: str = '', ip_tags: str = '*',
+                cat_tags: str = '*', capacity: int = None, barcode: str = '',
+                location: str = '', priority: int = 0) -> Optional[int]:
+        """创建箱子。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute('''
+                    INSERT INTO inventory_boxes (label, box_type, ip_tags, cat_tags, capacity, barcode, location, priority)
+                    VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?)
+                ''', (label, box_type, ip_tags, cat_tags, capacity, barcode, location, priority))
+                box_id = cursor.lastrowid
+                self.conn.commit()
+                return box_id
+            except Exception as e:
+                logger.error(f"创建箱子失败: {e}")
+                self.conn.rollback()
+                return None
+
+    def get_boxes(self) -> list[dict]:
+        """获取所有箱子（含商品数和满状态）。"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                SELECT b.id, b.label, b.box_type, b.ip_tags, b.cat_tags,
+                       b.capacity, b.is_full, b.barcode, b.location, b.priority,
+                       b.created_at, b.updated_at, b.is_default,
+                       COUNT(pb.id) AS product_count
+                FROM inventory_boxes b
+                LEFT JOIN inventory_product_box pb ON pb.box_id = b.id
+                GROUP BY b.id
+                ORDER BY b.priority DESC, b.id ASC
+            ''')
+            rows = cursor.fetchall()
+            return [self._row_to_box(r) for r in rows]
+
+    def get_box(self, box_id: int) -> Optional[dict]:
+        """获取单个箱子。"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                SELECT b.id, b.label, b.box_type, b.ip_tags, b.cat_tags,
+                       b.capacity, b.is_full, b.barcode, b.location, b.priority,
+                       b.created_at, b.updated_at, b.is_default,
+                       COUNT(pb.id) AS product_count
+                FROM inventory_boxes b
+                LEFT JOIN inventory_product_box pb ON pb.box_id = b.id
+                WHERE b.id = ?
+                GROUP BY b.id
+            ''', (box_id,))
+            row = cursor.fetchone()
+            return self._row_to_box(row) if row else None
+
+    def update_box(self, box_id: int, **kwargs) -> bool:
+        """更新箱子字段。kwargs 可含: label, box_type, ip_tags, cat_tags, capacity, is_full, barcode, location, priority。"""
+        allowed = {'label', 'box_type', 'ip_tags', 'cat_tags', 'capacity', 'is_full', 'barcode', 'location', 'priority'}
+        updates = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
+        if not updates:
+            return False
+        # barcode 空字符串转 NULL 避免 UNIQUE 冲突
+        if 'barcode' in updates and updates['barcode'] == '':
+            updates['barcode'] = None
+        updates['updated_at'] = datetime.now()
+        set_clause = ', '.join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [box_id]
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(f"UPDATE inventory_boxes SET {set_clause} WHERE id = ?", values)
+                self.conn.commit()
+                return True
+            except Exception as e:
+                logger.error(f"更新箱子失败: {e}")
+                self.conn.rollback()
+                return False
+
+    def delete_box(self, box_id: int) -> bool:
+        """删除箱子（CASCADE 自动清理关联的商品映射）。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute("DELETE FROM inventory_boxes WHERE id = ?", (box_id,))
+                self.conn.commit()
+                return cursor.rowcount > 0
+            except Exception as e:
+                logger.error(f"删除箱子失败: {e}")
+                self.conn.rollback()
+                return False
+
+    def clone_box(self, box_id: int, new_label: str) -> Optional[int]:
+        """复制箱子（仅复制规则，不复制商品映射）。"""
+        box = self.get_box(box_id)
+        if not box:
+            return None
+        # 只复制 ip_tags/cat_tags/box_type/capacity/priority/location，product_count 不入库
+        return self.add_box(
+            label=new_label,
+            box_type=box.get('box_type', ''),
+            ip_tags=box.get('ip_tags', '*'),
+            cat_tags=box.get('cat_tags', '*'),
+            capacity=box.get('capacity'),
+            location=box.get('location', ''),
+            priority=box.get('priority', 0),
+        )
+
+    def get_wildcard_box_count(self) -> int:
+        """统计非默认通配箱（ip_tags='*', cat_tags='*'）数量。"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM inventory_boxes WHERE ip_tags='*' AND cat_tags='*' AND COALESCE(is_default,0)=0"
+            )
+            return cursor.fetchone()[0]
+
+    def clear_box_mappings(self, box_id: int) -> int:
+        """释放指定箱子中的所有商品映射。"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute("DELETE FROM inventory_product_box WHERE box_id = ?", (box_id,))
+            self.conn.commit()
+            return cursor.rowcount
+
+    # ---- 商品-箱子映射 CRUD ----
+
+    def assign_item_to_box(self, item_id: str, box_id: int) -> bool:
+        """将商品分配到箱子。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute('''
+                    INSERT OR IGNORE INTO inventory_product_box (item_id, box_id)
+                    VALUES (?, ?)
+                ''', (item_id, box_id))
+                self.conn.commit()
+                if cursor.rowcount > 0:
+                    self._check_and_set_box_full(cursor, box_id)
+                    self.conn.commit()
+                return cursor.rowcount > 0
+            except Exception as e:
+                logger.error(f"分配商品到箱子失败: {e}")
+                self.conn.rollback()
+                return False
+
+    def remove_item_from_box(self, item_id: str, box_id: int) -> bool:
+        """将商品从箱子移出。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "DELETE FROM inventory_product_box WHERE item_id = ? AND box_id = ?",
+                    (item_id, box_id),
+                )
+                self.conn.commit()
+                return cursor.rowcount > 0
+            except Exception as e:
+                logger.error(f"移出商品失败: {e}")
+                self.conn.rollback()
+                return False
+
+    def clear_all_mappings(self) -> int:
+        """清空所有商品-箱子映射（重新分箱前调用）。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute("DELETE FROM inventory_product_box")
+                self.conn.commit()
+                return cursor.rowcount
+            except Exception as e:
+                logger.error(f"清空映射失败: {e}")
+                self.conn.rollback()
+                return 0
+
+    def get_box_products(self, box_id: int) -> list[dict]:
+        """获取箱子内所有商品（含 item_info 和 item_parents 数据）。"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                SELECT pb.id, pb.item_id, pb.box_id, pb.label_printed, pb.created_at,
+                       ii.item_title, ii.item_price,
+                       COALESCE(NULLIF(ip.images,''), ii.item_detail) AS img_source
+                FROM inventory_product_box pb
+                LEFT JOIN item_info ii ON ii.item_id = pb.item_id
+                LEFT JOIN item_parents ip ON ip.item_id = pb.item_id
+                WHERE pb.box_id = ?
+                ORDER BY pb.created_at DESC
+            ''', (box_id,))
+            rows = cursor.fetchall()
+            result = []
+            for r in rows:
+                images = []
+                src = r[7]
+                if src:
+                    try:
+                        import json
+                        d = json.loads(src) if isinstance(src, str) else src
+                        images = d if isinstance(d, list) else d.get('images', []) if isinstance(d, dict) else []
+                    except Exception:
+                        pass
+                result.append({
+                    'id': r[0], 'item_id': r[1], 'box_id': r[2],
+                    'label_printed': bool(r[3]), 'created_at': r[4],
+                    'item_title': r[5] or '', 'item_price': r[6],
+                    'images': images if isinstance(images, list) else [],
+                })
+            return result
+
+    def get_unboxed_items(self) -> list[dict]:
+        """获取尚未分配到任何箱子的商品（来自 item_info 表）。"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                SELECT ii.item_id, ii.item_title, ii.item_price, ii.item_detail, ii.cookie_id
+                FROM item_info ii
+                WHERE ii.item_id NOT IN (
+                    SELECT DISTINCT item_id FROM inventory_product_box
+                )
+                ORDER BY ii.item_title
+            ''')
+            rows = cursor.fetchall()
+            result = []
+            for r in rows:
+                images = []
+                detail = r[3]
+                if detail:
+                    try:
+                        import json
+                        d = json.loads(detail) if isinstance(detail, str) else detail
+                        images = d.get('images', []) if isinstance(d, dict) else []
+                    except Exception:
+                        pass
+                result.append({
+                    'item_id': r[0],
+                    'item_title': r[1] or '',
+                    'item_price': r[2],
+                    'images': images,
+                    'cookie_id': r[4] or '',
+                })
+            return result
+
+    def get_item_box(self, item_id: str) -> Optional[dict]:
+        """查询某商品所在的箱子。"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                SELECT b.id, b.label, b.barcode, b.location
+                FROM inventory_product_box pb
+                JOIN inventory_boxes b ON b.id = pb.box_id
+                WHERE pb.item_id = ?
+            ''', (item_id,))
+            row = cursor.fetchone()
+            if row:
+                return {'box_id': row[0], 'box_label': row[1], 'barcode': row[2], 'location': row[3]}
+            return None
+
+    def mark_label_printed(self, item_id: str, box_id: int) -> bool:
+        """标记标签已打印。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "UPDATE inventory_product_box SET label_printed = 1 WHERE item_id = ? AND box_id = ?",
+                    (item_id, box_id),
+                )
+                self.conn.commit()
+                return cursor.rowcount > 0
+            except Exception as e:
+                logger.error(f"标记标签已打印失败: {e}")
+                self.conn.rollback()
+                return False
+
+    def get_shipping_list(self) -> dict:
+        """获取发货清单：订单视图 + 箱子核对视图（含箱内具体商品）。"""
+        with self.lock:
+            cursor = self.conn.cursor()
+
+            # 订单视图
+            cursor.execute('''
+                SELECT o.order_id, o.item_id, o.amount, o.order_status,
+                       ii.item_title, ii.item_detail,
+                       b.label AS box_label, b.id AS box_id,
+                       pb.label_printed
+                FROM orders o
+                JOIN item_info ii ON ii.item_id = o.item_id
+                LEFT JOIN inventory_product_box pb ON pb.item_id = o.item_id
+                LEFT JOIN inventory_boxes b ON b.id = pb.box_id
+                WHERE o.order_status IN ('pending_ship', 'partial_success')
+                ORDER BY o.created_at DESC
+            ''')
+            orders = []
+            for r in cursor.fetchall():
+                images = []
+                detail = r[5]
+                if detail:
+                    try:
+                        import json
+                        d = json.loads(detail) if isinstance(detail, str) else detail
+                        images = d.get('images', []) if isinstance(d, dict) else []
+                    except Exception:
+                        pass
+                orders.append({
+                    'order_id': r[0], 'item_id': r[1], 'amount': r[2],
+                    'order_status': r[3], 'item_title': r[4] or '',
+                    'images': images,
+                    'box_label': r[6] or '未知', 'box_id': r[7],
+                    'label_printed': bool(r[8]) if r[8] is not None else False,
+                })
+
+            # 箱子核对视图
+            cursor.execute('''
+                SELECT b.id, b.label, b.barcode, b.location,
+                       COUNT(pb.id) AS pick_count,
+                       GROUP_CONCAT(ii.item_title, '|||') AS product_names
+                FROM inventory_boxes b
+                JOIN inventory_product_box pb ON pb.box_id = b.id
+                JOIN orders o ON o.item_id = pb.item_id
+                    AND o.order_status IN ('pending_ship', 'partial_success')
+                JOIN item_info ii ON ii.item_id = pb.item_id
+                GROUP BY b.id
+                HAVING pick_count > 0
+                ORDER BY b.label
+            ''')
+            box_summary = [
+                {
+                    'box_id': r[0], 'box_label': r[1], 'barcode': r[2],
+                    'location': r[3] or '', 'pick_count': r[4],
+                    'products': [p.strip() for p in (r[5] or '').split('|||') if p.strip()],
+                }
+                for r in cursor.fetchall()
+            ]
+
+            return {'orders': orders, 'box_summary': box_summary}
+
+    # ---- 箱子模板 CRUD ----
+
+    def get_templates(self) -> list[dict]:
+        """获取所有箱子模板。"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                SELECT id, name, ip_tags, cat_tags, box_type, capacity, sort_order
+                FROM box_templates
+                ORDER BY sort_order
+            ''')
+            return [
+                {'id': r[0], 'name': r[1], 'ip_tags': r[2], 'cat_tags': r[3],
+                 'box_type': r[4], 'capacity': r[5], 'sort_order': r[6]}
+                for r in cursor.fetchall()
+            ]
+
+    # ---- 内部辅助 ----
+
+    def _check_and_set_box_full(self, cursor, box_id: int):
+        """检查箱子容量，超限自动 is_full=1。"""
+        cursor.execute(
+            "SELECT capacity, is_full FROM inventory_boxes WHERE id = ?", (box_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return
+        capacity, is_full = row[0], row[1]
+        if capacity is None or is_full:
+            return
+        cursor.execute(
+            "SELECT COUNT(*) FROM inventory_product_box WHERE box_id = ?", (box_id,)
+        )
+        count = cursor.fetchone()[0]
+        if count >= capacity:
+            cursor.execute(
+                "UPDATE inventory_boxes SET is_full = 1, updated_at = ? WHERE id = ?",
+                (datetime.now(), box_id),
+            )
+            logger.info(f"[库存] 箱子 {box_id} 已满 ({count}/{capacity})")
+
+    def _row_to_box(self, row) -> dict:
+        return {
+            'id': row[0], 'label': row[1], 'box_type': row[2] or '',
+            'ip_tags': row[3] or '*', 'cat_tags': row[4] or '*',
+            'capacity': row[5], 'is_full': bool(row[6]),
+            'barcode': row[7] or '', 'location': row[8] or '',
+            'priority': row[9] or 0,
+            'created_at': row[10], 'updated_at': row[11],
+            'is_default': bool(row[12]) if len(row) > 12 else False,
+            'product_count': row[13] if len(row) > 13 else 0,
+        }
+
+    def _row_to_product_box(self, row) -> dict:
+        return {
+            'id': row[0],
+            'item_id': row[1],
+            'box_id': row[2],
+            'label_printed': bool(row[3]),
+            'created_at': row[4],
+            'item_title': row[5] or '',
+            'item_price': row[6],
+            'images': self._json_loads_safe(row[7] if len(row) > 7 else None, []),
+        }
+
+
+    def _migrate_items_to_sku(self, cursor):
+        """将 item_info 迁移到 item_parents/item_skus（幂等，增量）。"""
+        from datetime import datetime
+
+        # 统计需要处理的商品：没有 SKU 或 没有图片
+        cursor.execute("""
+            SELECT COUNT(*) FROM item_info ii
+            LEFT JOIN item_parents ip ON ip.item_id = ii.item_id
+            LEFT JOIN (SELECT parent_id, COUNT(*) AS cnt FROM item_skus GROUP BY parent_id) sku
+                ON sku.parent_id = ip.id
+            WHERE ip.id IS NULL OR COALESCE(sku.cnt, 0) = 0 OR COALESCE(ip.images, '') = ''
+        """)
+        pending = cursor.fetchone()[0]
+        if pending == 0:
+            return  # 无需迁移
+
+        cursor.execute("""
+            SELECT ii.cookie_id, ii.item_id, ii.item_title, ii.item_price,
+                   ii.item_detail, ii.is_multi_spec
+            FROM item_info ii
+            LEFT JOIN item_parents ip ON ip.item_id = ii.item_id
+            LEFT JOIN (SELECT parent_id, COUNT(*) AS cnt FROM item_skus GROUP BY parent_id) sku
+                ON sku.parent_id = ip.id
+            WHERE ip.id IS NULL OR COALESCE(sku.cnt, 0) = 0 OR COALESCE(ip.images, '') = ''
+        """)
+        rows = cursor.fetchall()
+        migrated = 0
+        import json as _json
+
+        for row in rows:
+            cookie_id, item_id, title, price, detail, is_multi = row
+            title = title or ''
+            if not title:
+                continue
+            try:
+                # ---- 解析 item_detail JSON ----
+                detail_obj = None
+                images_json = ''
+                sku_data = None
+                if detail:
+                    try:
+                        detail_obj = _json.loads(detail) if isinstance(detail, str) else detail
+                        if isinstance(detail_obj, dict):
+                            # 图片
+                            imgs = detail_obj.get('images', [])
+                            images_json = _json.dumps(imgs, ensure_ascii=False) if imgs else ''
+                            # SKU 数据（多种可能的键名）
+                            sku_data = (detail_obj.get('skuBase') or
+                                       detail_obj.get('skuData') or
+                                       detail_obj.get('skuInfo') or
+                                       detail_obj.get('skuProps'))
+                    except Exception:
+                        detail_obj = None
+
+                # ---- 插入/更新 item_parents ----
+                cursor.execute("""
+                    INSERT INTO item_parents (item_id, title, cookie_id, images)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(item_id) DO UPDATE SET
+                        images = COALESCE(NULLIF(excluded.images, ''), item_parents.images, ''),
+                        title = CASE WHEN COALESCE(item_parents.title, '') = '' THEN excluded.title ELSE item_parents.title END
+                """, (item_id, title, cookie_id or '', images_json))
+                parent_id = cursor.lastrowid
+                if parent_id == 0:
+                    cursor.execute("SELECT id FROM item_parents WHERE item_id=?", (item_id,))
+                    parent_id = cursor.fetchone()[0]
+
+                # ---- 创建 SKU ----
+                cursor.execute("SELECT COUNT(*) FROM item_skus WHERE parent_id = ?", (parent_id,))
+                if cursor.fetchone()[0] > 0:
+                    continue  # 已有 SKU，跳过
+
+                if sku_data and sku_data.get('skus'):
+                    for sku in sku_data['skus']:
+                        cursor.execute("""
+                            INSERT OR IGNORE INTO item_skus (parent_id, sku_id, props_text, price)
+                            VALUES (?, ?, ?, ?)
+                        """, (parent_id, str(sku.get('skuId', '')), sku.get('props', '') or '',
+                              float(str(sku.get('price') or price).replace('¥', '').strip() or 0)))
+                else:
+                    # 单规格
+                    clean_price = str(price or '').replace('¥', '').replace(',', '').strip()
+                    cursor.execute("""
+                        INSERT OR IGNORE INTO item_skus (parent_id, sku_id, props_text, price)
+                        VALUES (?, ?, '', ?)
+                    """, (parent_id, item_id, float(clean_price or 0)))
+                migrated += 1
+            except Exception as e:
+                logger.warning(f"SKU迁移跳过 {item_id}: {e}")
+
+        if migrated:
+            logger.info(f"[SKU迁移] 已迁移/更新 {migrated} 条商品")
+        self.conn.commit()
+
+    # ---- SKU 查询 ----
+
+    def get_parent_products(self, cookie_id: str = '') -> list[dict]:
+        """获取父商品列表（含 SKU 子列表）。"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            if cookie_id:
+                cursor.execute("""
+                    SELECT id, item_id, title, images, props, cookie_id, status, created_at
+                    FROM item_parents WHERE cookie_id = ? ORDER BY title
+                """, (cookie_id,))
+            else:
+                cursor.execute("""
+                    SELECT id, item_id, title, images, props, cookie_id, status, created_at
+                    FROM item_parents ORDER BY title
+                """)
+            parents = []
+            for r in cursor.fetchall():
+                pid = r[0]
+                item_id = r[1]
+                cursor.execute("""
+                    SELECT id, sku_id, props_text, price, stock, status
+                    FROM item_skus WHERE parent_id = ? ORDER BY id
+                """, (pid,))
+                skus = [
+                    {'id': s[0], 'sku_id': s[1], 'props_text': s[2] or '',
+                     'price': s[3], 'stock': s[4] or 0, 'status': s[5]}
+                    for s in cursor.fetchall()
+                ]
+                # 查询商品所在箱子
+                cursor.execute("""
+                    SELECT b.id, b.label FROM inventory_boxes b
+                    JOIN inventory_product_box pb ON pb.box_id = b.id
+                    WHERE pb.item_id = ? LIMIT 1
+                """, (item_id,))
+                box_row = cursor.fetchone()
+                parents.append({
+                    'id': r[0], 'item_id': item_id, 'title': r[2] or '',
+                    'images': self._json_loads_safe(r[3], []), 'props': r[4],
+                    'cookie_id': r[5], 'status': r[6], 'created_at': r[7],
+                    'skus': skus, 'sku_count': len(skus),
+                    'box_id': box_row[0] if box_row else None,
+                    'box_label': box_row[1] if box_row else '',
+                })
+            return parents
+
+    def upsert_parent_images(self, item_id: str, images: list, title: str = '', cookie_id: str = '') -> bool:
+        """更新 item_parents 的 images 字段，插入时自动补全标题。"""
+        if not item_id or not images:
+            return False
+        import json
+        images_json = json.dumps(images, ensure_ascii=False)
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                # 如果未传标题，从 item_info 补全
+                if not title:
+                    cursor.execute("SELECT item_title, cookie_id FROM item_info WHERE item_id = ? LIMIT 1", (item_id,))
+                    row = cursor.fetchone()
+                    if row:
+                        title = row[0] or ''
+                        if not cookie_id:
+                            cookie_id = row[1] or ''
+                cursor.execute("""
+                    INSERT INTO item_parents (item_id, title, cookie_id, images)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(item_id) DO UPDATE SET
+                        images = excluded.images,
+                        title = CASE WHEN COALESCE(item_parents.title, '') = '' THEN excluded.title ELSE item_parents.title END
+                """, (item_id, title or '', cookie_id or '', images_json))
+                self.conn.commit()
+                return cursor.rowcount > 0
+            except Exception as e:
+                logger.error(f"更新商品图片失败: {e}")
+                self.conn.rollback()
+                return False
+
+
 db_manager = DBManager()
 
 # 确保进程结束时关闭数据库连接

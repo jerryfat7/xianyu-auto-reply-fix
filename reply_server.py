@@ -16037,6 +16037,315 @@ async def scheduled_task_checker():
         await asyncio.sleep(60)
 
 
+# ============================================================
+# 库存管理 API (Phase 3)
+# ============================================================
+
+# ---- 模板 ----
+
+@app.get('/api/inventory/templates')
+async def inventory_get_templates(user_info: Dict[str, Any] = Depends(require_auth)):
+    """获取箱子模板列表"""
+    templates = db_manager.get_templates()
+    return {"templates": templates}
+
+
+# ---- 箱子 CRUD ----
+
+@app.get('/api/inventory/boxes')
+async def inventory_get_boxes(user_info: Dict[str, Any] = Depends(require_auth)):
+    """获取所有箱子（含商品数和满状态）"""
+    boxes = db_manager.get_boxes()
+    return {"boxes": boxes}
+
+
+@app.post('/api/inventory/boxes')
+async def inventory_create_box(request: Request, user_info: Dict[str, Any] = Depends(require_auth)):
+    """创建箱子。不可创建与兜底箱子相同的 */* 箱子。"""
+    body = await request.json()
+    ip_tags = body.get('ip_tags', '*')
+    cat_tags = body.get('cat_tags', '*')
+    if ip_tags == '*' and cat_tags == '*' and db_manager.get_wildcard_box_count() >= 1:
+        raise HTTPException(400, "兜底箱子已存在，不可再创建通配箱")
+    box_id = db_manager.add_box(
+        label=body.get('label', ''),
+        box_type=body.get('box_type', ''),
+        ip_tags=ip_tags,
+        cat_tags=cat_tags,
+        capacity=body.get('capacity'),
+        barcode=body.get('barcode', ''),
+        location=body.get('location', ''),
+        priority=body.get('priority', 0),
+    )
+    if box_id:
+        return {"id": box_id, "message": "箱子创建成功"}
+    raise HTTPException(500, "创建箱子失败")
+
+
+@app.put('/api/inventory/boxes/{box_id}')
+async def inventory_update_box(box_id: int, request: Request, user_info: Dict[str, Any] = Depends(require_auth)):
+    """编辑箱子。兜底箱子不可修改 ip_tags/cat_tags。"""
+    body = await request.json()
+    box = db_manager.get_box(box_id)
+    if not box:
+        raise HTTPException(404, "箱子不存在")
+
+    new_ip = body.get('ip_tags')
+    new_cat = body.get('cat_tags')
+    if (new_ip is not None or new_cat is not None) and box.get('is_default'):
+        raise HTTPException(400, "兜底箱子的IP/品类不可修改")
+
+    # 校验 ip_tags / cat_tags 修改
+    if not box.get('is_default') and (new_ip is not None or new_cat is not None):
+        products = db_manager.get_box_products(box_id)
+        if products:
+            check_ip = new_ip if new_ip is not None else box.get('ip_tags', '*')
+            check_cat = new_cat if new_cat is not None else box.get('cat_tags', '*')
+            from auto_box_engine import _match_item
+            conflicts = [
+                {'item_id': p['item_id'], 'item_title': p.get('item_title', '')}
+                for p in products
+                if not _match_item((p.get('item_title') or '').lower(), check_ip, check_cat)
+            ]
+            if conflicts:
+                raise HTTPException(409, {"detail": "箱内有商品不符合新规则", "conflicts": conflicts})
+
+    ok = db_manager.update_box(box_id, **{k: v for k, v in body.items() if v is not None})
+    if ok:
+        return {"message": "箱子更新成功"}
+    raise HTTPException(500, "更新箱子失败")
+
+
+@app.delete('/api/inventory/boxes/{box_id}')
+async def inventory_delete_box(box_id: int, user_info: Dict[str, Any] = Depends(require_auth)):
+    """删除箱子。兜底箱子不可删除。"""
+    box = db_manager.get_box(box_id)
+    if not box:
+        raise HTTPException(404, "箱子不存在")
+    if box.get('is_default'):
+        raise HTTPException(400, "兜底箱子不可删除，请使用释放全部商品功能")
+    ok = db_manager.delete_box(box_id)
+    if ok:
+        return {"message": "箱子删除成功"}
+    raise HTTPException(404, "箱子不存在")
+
+
+@app.post('/api/inventory/boxes/default/release')
+async def inventory_release_default_box(user_info: Dict[str, Any] = Depends(require_auth)):
+    """释放兜底箱子中的所有商品。"""
+    # 查找默认箱子
+    boxes = db_manager.get_boxes()
+    default_box = next((b for b in boxes if b.get('is_default')), None)
+    if not default_box:
+        raise HTTPException(404, "兜底箱子不存在")
+    count = db_manager.clear_box_mappings(default_box['id'])
+    return {"message": f"已释放 {count} 件商品", "count": count}
+
+
+@app.post('/api/inventory/boxes/{box_id}/clone')
+async def inventory_clone_box(box_id: int, request: Request, user_info: Dict[str, Any] = Depends(require_auth)):
+    """复制箱子（仅规则，不含商品）。"""
+    body = await request.json()
+    new_label = body.get('label', '')
+    if not new_label:
+        raise HTTPException(400, "请提供新箱子名称")
+    new_id = db_manager.clone_box(box_id, new_label)
+    if new_id:
+        return {"id": new_id, "message": "箱子复制成功"}
+    raise HTTPException(404, "原箱子不存在")
+
+
+@app.get('/api/inventory/boxes/{box_id}/products')
+async def inventory_get_box_products(box_id: int, user_info: Dict[str, Any] = Depends(require_auth)):
+    """查看箱子内所有商品。"""
+    products = db_manager.get_box_products(box_id)
+    return {"products": products}
+
+
+# ---- 商品手动分配 ----
+
+@app.put('/api/inventory/products/{item_id}/box')
+async def inventory_assign_product(item_id: str, request: Request, user_info: Dict[str, Any] = Depends(require_auth)):
+    """手动修改商品所属箱子。"""
+    body = await request.json()
+    new_box_id = body.get('box_id')
+    if not new_box_id:
+        raise HTTPException(400, "缺少 box_id")
+    # 先从旧箱子移除，再分配到新箱子
+    old_box = db_manager.get_item_box(item_id)
+    if old_box:
+        db_manager.remove_item_from_box(item_id, old_box['box_id'])
+    ok = db_manager.assign_item_to_box(item_id, new_box_id)
+    if ok:
+        return {"message": "商品分配成功"}
+    raise HTTPException(500, "分配失败")
+
+
+# ---- 箱内商品移出/移动 ----
+
+@app.delete('/api/inventory/boxes/{box_id}/products/{item_id}')
+async def inventory_remove_product(box_id: int, item_id: str, user_info: Dict[str, Any] = Depends(require_auth)):
+    """从箱子中移出商品。"""
+    ok = db_manager.remove_item_from_box(item_id, box_id)
+    if ok:
+        return {"message": "已移出", "box_id": box_id, "item_id": item_id}
+    raise HTTPException(404, "商品不在该箱子中")
+
+
+@app.post('/api/inventory/boxes/{box_id}/products/{item_id}/move')
+async def inventory_move_product(box_id: int, item_id: str, request: Request, user_info: Dict[str, Any] = Depends(require_auth)):
+    """将商品移动到其他箱子。"""
+    body = await request.json()
+    to_box_id = body.get('to_box_id')
+    if not to_box_id:
+        raise HTTPException(400, "缺少 to_box_id")
+    if to_box_id == box_id:
+        raise HTTPException(400, "目标箱子与当前箱子相同")
+    target = db_manager.get_box(to_box_id)
+    if not target:
+        raise HTTPException(404, "目标箱子不存在")
+    from db_manager import db_manager as dbm
+    with dbm.lock:
+        cur = dbm.conn.cursor()
+        cur.execute("DELETE FROM inventory_product_box WHERE item_id=? AND box_id=?", (item_id, box_id))
+        cur.execute("INSERT OR IGNORE INTO inventory_product_box (item_id, box_id) VALUES (?,?)", (item_id, to_box_id))
+        if cur.rowcount > 0:
+            cur.execute("SELECT COUNT(*) FROM inventory_product_box WHERE box_id=?", (to_box_id,))
+            cnt = cur.fetchone()[0]
+            cap = target.get('capacity')
+            if cap and cnt >= cap:
+                cur.execute("UPDATE inventory_boxes SET is_full=1 WHERE id=?", (to_box_id,))
+        dbm.conn.commit()
+    return {"message": "已移动", "from_box": box_id, "to_box": to_box_id}
+
+
+# ---- 发货清单 ----
+
+@app.get('/api/inventory/shipping-list')
+async def inventory_shipping_list(user_info: Dict[str, Any] = Depends(require_auth)):
+    """获取发货清单（订单视图 + 箱子核对视图）。"""
+    data = db_manager.get_shipping_list()
+    return data
+
+
+# ---- 自动分箱 + 重新分箱 ----
+
+@app.post('/api/inventory/auto-box')
+async def inventory_auto_box(user_info: Dict[str, Any] = Depends(require_auth)):
+    """触发自动分箱（仅处理未分配商品）。"""
+    from auto_box_engine import auto_box
+    result = auto_box(db_manager, only_new=True)
+    return {
+        "total": result.total,
+        "assigned": result.assigned,
+        "unmatched": result.unmatched,
+        "overflow": result.overflow,
+        "overflow_detail": result.overflow_detail,
+        "unmatched_items": result.unmatched_items,
+    }
+
+
+@app.post('/api/inventory/rebox-all')
+async def inventory_rebox_all(request: Request, user_info: Dict[str, Any] = Depends(require_auth)):
+    """重新分箱（需确认文本）。"""
+    body = await request.json()
+    confirm = body.get('confirm', '')
+    from auto_box_engine import rebox_all
+    result = rebox_all(db_manager, confirm)
+    if result is None:
+        raise HTTPException(400, "确认文本不匹配，操作取消")
+    return {
+        "total": result.total,
+        "assigned": result.assigned,
+        "unmatched": result.unmatched,
+        "overflow": result.overflow,
+        "overflow_detail": result.overflow_detail,
+        "unmatched_items": result.unmatched_items,
+    }
+
+
+@app.get('/api/inventory/unmatched')
+async def inventory_unmatched(user_info: Dict[str, Any] = Depends(require_auth)):
+    """获取未分配 + 溢出商品列表。"""
+    unboxed = db_manager.get_unboxed_items()
+    return {"unboxed": unboxed, "count": len(unboxed)}
+
+
+# ---- 打印标签 ----
+
+@app.get('/api/inventory/parent-products')
+async def inventory_parent_products(user_info: Dict[str, Any] = Depends(require_auth)):
+    """获取父商品列表（含 SKU 子列表）。"""
+    products = db_manager.get_parent_products()
+    return {"products": products}
+
+
+# ---- 打印标签 ----
+
+@app.post('/api/inventory/print-labels/{box_id}')
+async def inventory_print_labels(box_id: int, user_info: Dict[str, Any] = Depends(require_auth)):
+    """打印指定箱子的标签（箱子标签 + 箱内所有商品标签）。"""
+    from label_print_client import get_client
+    box = db_manager.get_box(box_id)
+    if not box:
+        raise HTTPException(404, "箱子不存在")
+    products = db_manager.get_box_products(box_id)
+
+    client = get_client()
+    results = []
+
+    # 打印箱子标签
+    try:
+        task_id = client.print_box_label(
+            box_name=box.get('label', ''),
+            box_barcode=box.get('barcode', ''),
+            box_description=f"{box.get('box_type', '')} | {box.get('location', '')}",
+        )
+        client.wait_print_done(task_id)
+        results.append({"type": "box", "label": box['label'], "status": "done"})
+    except Exception as e:
+        results.append({"type": "box", "label": box['label'], "status": "error", "error": str(e)})
+
+    # 批量打印商品标签
+    if products:
+        try:
+            print_items = [
+                {"name": p.get('item_title', ''), "phone": p.get('item_id', ''), "address": box.get('label', '')}
+                for p in products
+            ]
+            task_id = client.print_product_labels(print_items)
+            client.wait_print_done(task_id)
+            results.append({"type": "products", "count": len(products), "status": "done"})
+            # 标记已打印
+            for p in products:
+                db_manager.mark_label_printed(p['item_id'], box_id)
+        except Exception as e:
+            results.append({"type": "products", "count": len(products), "status": "error", "error": str(e)})
+
+    return {"results": results}
+
+
+@app.post('/api/inventory/products/{item_id}/print-label')
+async def inventory_print_single_product(item_id: str, request: Request, user_info: Dict[str, Any] = Depends(require_auth)):
+    """打印单个商品标签（含商品名、箱名、商品ID）。"""
+    from label_print_client import get_client
+    body = await request.json()
+    box_label = body.get('box_label', '')
+    item_name = body.get('item_name', '')
+
+    client = get_client()
+    try:
+        task_id = client.print_single_product_label(
+            item_name=item_name,
+            item_id=item_id,
+            box_label=box_label,
+        )
+        client.wait_print_done(task_id)
+        return {"status": "done", "item_id": item_id}
+    except Exception as e:
+        raise HTTPException(500, f"打印失败: {e}")
+
+
 # 移除自动启动，由Start.py或手动启动
 # if __name__ == "__main__":
 #     uvicorn.run(app, host="0.0.0.0", port=8080)
