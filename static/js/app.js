@@ -189,6 +189,9 @@ function showSection(sectionName) {
     case 'online-im':        // 【在线客服菜单】
         loadOnlineIm();
         break;
+    case 'inventory':        // 【库存管理菜单】
+        showInventoryTab('boxes');
+        break;
     case 'blacklist':        // 【黑名单管理菜单】
         loadBlacklistPage();
         break;
@@ -24192,5 +24195,536 @@ async function savePolishSchedule() {
         closePolishScheduleModal();
     } catch (error) {
         console.error('保存定时擦亮设置失败:', error);
+    }
+}
+
+// ============================================================
+// 库存管理 (Phase 3)
+// ============================================================
+
+let invCurrentTab = 'boxes';
+
+async function showInventorySection(tab) {
+    showSection('inventory');
+    showInventoryTab(tab || 'boxes');
+}
+
+function showInventoryTab(tab) {
+    invCurrentTab = tab;
+    // 更新 tab nav-link 的 active 状态
+    document.querySelectorAll('#inventoryTabs .nav-link').forEach(el => {
+        el.classList.remove('active');
+        const href = el.getAttribute('onclick') || '';
+        if (href.includes(`'${tab}'`)) el.classList.add('active');
+    });
+    document.getElementById('inv-tab-boxes').style.display = tab === 'boxes' ? '' : 'none';
+    document.getElementById('inv-tab-products').style.display = tab === 'products' ? '' : 'none';
+    document.getElementById('inv-tab-autobox').style.display = tab === 'autobox' ? '' : 'none';
+    document.getElementById('inv-tab-shipping').style.display = tab === 'shipping' ? '' : 'none';
+    if (tab === 'boxes') loadBoxes();
+    if (tab === 'products') loadInventoryProducts();
+    if (tab === 'autobox') { document.getElementById('autobox-result').style.display = 'none'; }
+    if (tab === 'shipping') loadShippingList();
+}
+
+async function loadBoxes() {
+    const tbody = document.getElementById('boxesTableBody');
+    tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">加载中...</td></tr>';
+    try {
+        const token = localStorage.getItem('auth_token') || '';
+        const resp = await fetch('/api/inventory/boxes', { headers: { 'Authorization': `Bearer ${token}` } });
+        const data = await resp.json();
+        if (!data.boxes || data.boxes.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">暂无箱子，请新建</td></tr>';
+            return;
+        }
+        tbody.innerHTML = data.boxes.map(b => {
+            const fullIcon = b.is_full ? '<span class="badge bg-danger">满</span>' : '<span class="badge bg-success">可分配</span>';
+            const capText = b.capacity ? `${b.product_count}/${b.capacity}` : `${b.product_count}/-`;
+            const defaultBadge = b.is_default ? ' <span class="badge bg-warning text-dark">系统</span>' : '';
+            const deleteBtn = b.is_default ? '' : `<button class="btn btn-sm btn-outline-danger" onclick="deleteBox(${b.id})" title="删除"><i class="bi bi-trash"></i></button>`;
+            return `<tr>
+                <td><strong><a href="javascript:void(0)" class="text-decoration-none" onclick="viewBoxProducts(${b.id})">${escHtml(b.label)}</a></strong>${defaultBadge}</td>
+                <td>${escHtml(b.box_type)}</td>
+                <td><small>${escHtml(b.ip_tags)}</small></td>
+                <td><small>${escHtml(b.cat_tags)}</small></td>
+                <td>${capText}</td>
+                <td>${fullIcon}</td>
+                <td>${b.priority}</td>
+                <td>${escHtml(b.location)}</td>
+                <td>
+                    <button class="btn btn-sm btn-outline-primary" onclick="editBox(${b.id})" title="编辑"><i class="bi bi-pencil"></i></button>
+                    <button class="btn btn-sm btn-outline-success" onclick="cloneBox(${b.id})" title="复制"><i class="bi bi-copy"></i></button>
+                    ${deleteBtn}
+                    <button class="btn btn-sm btn-outline-info" onclick="toggleBoxFull(${b.id},${b.is_full ? 0 : 1})" title="${b.is_full ? '取消满标记' : '标记已满'}"><i class="bi bi-${b.is_full ? 'unlock' : 'lock'}"></i></button>
+                    <button class="btn btn-sm btn-outline-warning" onclick="printBoxLabels(${b.id})" title="打印标签"><i class="bi bi-printer"></i></button>
+                </td>
+            </tr>`;
+        }).join('');
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="9" class="text-center text-danger">加载失败: ${escHtml(e.message)}</td></tr>`;
+    }
+}
+
+function showBoxForm(boxId) {
+    document.getElementById('boxFormId').value = boxId || '';
+    document.getElementById('boxFormTitle').textContent = boxId ? '编辑箱子' : '新建箱子';
+    loadTemplates();
+    const releaseBtn = document.getElementById('boxFormReleaseBtn');
+    releaseBtn.style.display = 'none';
+    if (boxId) {
+        fetch(`/api/inventory/boxes/${boxId}/products`, { headers: authHeaders() }).then(r => r.json()).then(d => {
+            const token = localStorage.getItem('auth_token') || '';
+            fetch('/api/inventory/boxes', { headers: { 'Authorization': `Bearer ${token}` } }).then(r => r.json()).then(data => {
+                const box = (data.boxes || []).find(b => b.id === boxId);
+                if (box) fillBoxForm(box);
+            });
+        });
+    } else {
+        document.getElementById('boxFormLabel').value = '';
+        document.getElementById('boxFormType').value = '';
+        document.getElementById('boxFormCapacity').value = '';
+        document.getElementById('boxFormIp').value = '*';
+        document.getElementById('boxFormCat').value = '*';
+        document.getElementById('boxFormLocation').value = '';
+        document.getElementById('boxFormPriority').value = 0;
+        setIpCatDisabled(false);
+        document.getElementById('boxFormCapacity').disabled = false;
+        document.getElementById('boxFormPriority').disabled = false;
+    }
+    new bootstrap.Modal(document.getElementById('boxFormModal')).show();
+}
+
+function setIpCatDisabled(disabled) {
+    document.getElementById('boxFormIp').disabled = disabled;
+    document.getElementById('boxFormCat').disabled = disabled;
+}
+
+function fillBoxForm(box) {
+    const isDefault = !!box.is_default;
+    document.getElementById('boxFormLabel').value = box.label || '';
+    document.getElementById('boxFormType').value = box.box_type || '';
+    document.getElementById('boxFormCapacity').value = box.capacity || '';
+    document.getElementById('boxFormIp').value = box.ip_tags || '*';
+    document.getElementById('boxFormCat').value = box.cat_tags || '*';
+    document.getElementById('boxFormLocation').value = box.location || '';
+    document.getElementById('boxFormPriority').value = box.priority || 0;
+    setIpCatDisabled(isDefault);
+    document.getElementById('boxFormCapacity').disabled = isDefault;
+    document.getElementById('boxFormPriority').disabled = isDefault;
+    // 兜底箱子：显示释放按钮
+    const releaseBtn = document.getElementById('boxFormReleaseBtn');
+    releaseBtn.style.display = isDefault ? '' : 'none';
+    releaseBtn.onclick = () => releaseDefaultBox(box.id);
+}
+
+async function releaseDefaultBox(boxId) {
+    if (!confirm('确认释放兜底箱子中的所有商品？\n这些商品将变为"未分配"状态。')) return;
+    try {
+        const resp = await fetch('/api/inventory/boxes/default/release', { method: 'POST', headers: authHeaders() });
+        const data = await resp.json();
+        if (!resp.ok) { alert(data.detail || '释放失败'); return; }
+        alert(data.message);
+        bootstrap.Modal.getInstance(document.getElementById('boxFormModal')).hide();
+        loadBoxes();
+    } catch (e) { alert('释放失败: ' + e.message); }
+}
+
+async function loadTemplates() {
+    const sel = document.getElementById('boxFormTemplate');
+    if (sel.options.length > 1) return; // already loaded
+    try {
+        const resp = await fetch('/api/inventory/templates', { headers: authHeaders() });
+        const data = await resp.json();
+        (data.templates || []).forEach(t => {
+            const opt = document.createElement('option');
+            opt.value = JSON.stringify({ ip: t.ip_tags, cat: t.cat_tags, type: t.box_type, cap: t.capacity });
+            opt.textContent = t.name;
+            sel.appendChild(opt);
+        });
+    } catch (e) { /* ignore */ }
+}
+
+function applyBoxTemplate() {
+    const sel = document.getElementById('boxFormTemplate');
+    if (!sel.value) return;
+    try {
+        const t = JSON.parse(sel.value);
+        document.getElementById('boxFormIp').value = t.ip;
+        document.getElementById('boxFormCat').value = t.cat;
+        document.getElementById('boxFormType').value = t.type;
+        document.getElementById('boxFormCapacity').value = t.cap || '';
+    } catch (e) { }
+}
+
+async function saveBox() {
+    const id = document.getElementById('boxFormId').value;
+    const body = {
+        label: document.getElementById('boxFormLabel').value.trim(),
+        box_type: document.getElementById('boxFormType').value.trim(),
+        capacity: document.getElementById('boxFormCapacity').value ? parseInt(document.getElementById('boxFormCapacity').value) : null,
+        ip_tags: document.getElementById('boxFormIp').value.trim() || '*',
+        cat_tags: document.getElementById('boxFormCat').value.trim() || '*',
+        location: document.getElementById('boxFormLocation').value.trim(),
+        priority: parseInt(document.getElementById('boxFormPriority').value) || 0,
+    };
+    if (!body.label) { alert('请输入箱子名称'); return; }
+    if (body.ip_tags === '待填') { alert('请填写 IP 关键词'); return; }
+    try {
+        const method = id ? 'PUT' : 'POST';
+        const url = id ? `/api/inventory/boxes/${id}` : '/api/inventory/boxes';
+        const resp = await fetch(url, { method, headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            if (err.detail && err.detail.conflicts) {
+                alert(`无法修改：箱内有 ${err.detail.conflicts.length} 件商品不符合新规则`);
+                return;
+            }
+            throw new Error(err.detail?.detail || err.detail || '操作失败');
+        }
+        bootstrap.Modal.getInstance(document.getElementById('boxFormModal')).hide();
+        loadBoxes();
+    } catch (e) { alert('保存失败: ' + e.message); }
+}
+
+async function cloneBox(id) {
+    // 直接用 API 复制，使用默认名称 "原标签-副本"
+    try {
+        const boxesResp = await fetch('/api/inventory/boxes', { headers: authHeaders() }).then(r => r.json());
+        const box = (boxesResp.boxes || []).find(b => b.id === id);
+        const newLabel = (box ? box.label : '箱子') + '-副本';
+        const resp = await fetch(`/api/inventory/boxes/${id}/clone`, {
+            method: 'POST',
+            headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ label: newLabel })
+        });
+        if (!resp.ok) { const err = await resp.json().catch(() => ({})); alert(err.detail || '复制失败'); return; }
+        loadBoxes();
+    } catch (e) { alert('复制失败: ' + e.message); }
+}
+
+async function deleteBox(id) {
+    if (!confirm('确认删除此箱子？箱内商品将变为未分配状态。')) return;
+    try {
+        const resp = await fetch(`/api/inventory/boxes/${id}`, { method: 'DELETE', headers: authHeaders() });
+        if (!resp.ok) { const err = await resp.json().catch(() => ({})); alert(err.detail || '删除失败'); return; }
+        loadBoxes();
+    } catch (e) { alert(e.message); }
+}
+
+async function editBox(id) { showBoxForm(id); }
+
+// ---- 箱内商品查看 ----
+
+let _viewBoxId = 0;
+let _boxProductsModal = null;
+
+async function viewBoxProducts(boxId) {
+    _viewBoxId = boxId;
+    const modalEl = document.getElementById('boxProductsModal');
+    document.getElementById('boxProductsTbody').innerHTML = '<tr><td colspan="4" class="text-center text-muted">加载中...</td></tr>';
+    // 只在首次打开时创建 modal，后续只刷新内容
+    if (!_boxProductsModal) {
+        _boxProductsModal = new bootstrap.Modal(modalEl);
+        modalEl.addEventListener('hidden.bs.modal', () => { _boxProductsModal = null; });
+    }
+    if (!modalEl.classList.contains('show')) {
+        _boxProductsModal.show();
+    }
+    try {
+        const [prodResp, boxesResp] = await Promise.all([
+            fetch(`/api/inventory/boxes/${boxId}/products`, { headers: authHeaders() }).then(r => r.json()),
+            fetch('/api/inventory/boxes', { headers: authHeaders() }).then(r => r.json())
+        ]);
+        const products = prodResp.products || [];
+        _viewProducts = products;
+        const box = (boxesResp.boxes || []).find(b => b.id === boxId);
+        const otherBoxes = (boxesResp.boxes || []).filter(b => b.id !== boxId);
+
+        document.getElementById('boxProductsTitle').textContent = '📦 ' + (box ? box.label : '箱子');
+        const capText = box && box.capacity ? `${products.length}/${box.capacity}` : `${products.length}/-`;
+        const fullClass = box && box.is_full ? ' text-danger fw-bold' : '';
+        document.getElementById('boxProductsMeta').innerHTML =
+            `<span>${escHtml(box?.ip_tags||'*')} ｜ ${escHtml(box?.cat_tags||'*')} ｜ <span class="${fullClass}">${capText} 件</span></span>`;
+        document.getElementById('boxProductsCount').textContent = `共 ${products.length} 件`;
+
+        if (products.length === 0) {
+            document.getElementById('boxProductsTbody').innerHTML = '<tr><td colspan="4" class="text-center text-muted">箱内暂无商品</td></tr>';
+            return;
+        }
+        const otherOpts = otherBoxes.map(b => {
+            const full = b.is_full ? 'disabled' : '';
+            const lbl = b.is_full ? `${escHtml(b.label)} (已满)` : escHtml(b.label);
+            return `<option value="${b.id}" ${full}>${lbl}</option>`;
+        }).join('');
+        document.getElementById('boxProductsTbody').innerHTML = products.map((p, i) => {
+            const img = (p.images && p.images.length) ? ` onerror="this.style.display='none'"` : '';
+            const imgSrc = (p.images && p.images.length) ? p.images[0] : '';
+            return `<tr>
+                <td>${imgSrc ? `<img src="${escHtml(imgSrc)}" style="width:48px;height:48px;object-fit:contain;background:#f8f9fa">` : ''}</td>
+                <td><small class="text-truncate d-inline-block" style="max-width:260px">${escHtml(p.item_title||'')}</small></td>
+                <td><small>${p.item_price||''}</small></td>
+                <td>
+                    <button class="btn btn-outline-warning btn-sm py-0" onclick="printProductLabel('${escHtml(p.item_id)}','${escHtml(p.item_title||'')}','${escHtml(box?.label||'')}')" title="打印标签"><i class="bi bi-printer"></i></button>
+                    <button class="btn btn-outline-danger btn-sm py-0" onclick="removeFromBox(${boxId},'${escHtml(p.item_id)}')">移出</button>
+                    <select class="form-select form-select-sm d-inline-block ms-1" style="width:auto" onchange="moveToBox(${boxId},'${escHtml(p.item_id)}',this.value);this.value=''">
+                        <option value="">移动到...</option>${otherOpts}
+                    </select>
+                </td>
+            </tr>`;
+        }).join('');
+    } catch (e) {
+        document.getElementById('boxProductsTbody').innerHTML = `<tr><td colspan="4" class="text-center text-danger">加载失败: ${escHtml(e.message)}</td></tr>`;
+    }
+}
+
+async function removeFromBox(boxId, itemId) {
+    if (!confirm('确认将此商品从箱子中移出？')) return;
+    try {
+        const resp = await fetch(`/api/inventory/boxes/${boxId}/products/${encodeURIComponent(itemId)}`, { method: 'DELETE', headers: authHeaders() });
+        if (!resp.ok) { const err = await resp.json().catch(()=>({})); alert(err.detail||'移出失败'); return; }
+        viewBoxProducts(boxId); loadBoxes();
+    } catch (e) { alert('移出失败: '+e.message); }
+}
+
+async function moveToBox(fromBoxId, itemId, toBoxId) {
+    if (!toBoxId) return;
+    try {
+        const resp = await fetch(`/api/inventory/boxes/${fromBoxId}/products/${encodeURIComponent(itemId)}/move`, {
+            method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ to_box_id: parseInt(toBoxId) })
+        });
+        if (!resp.ok) { const err = await resp.json().catch(()=>({})); alert(err.detail||'移动失败'); return; }
+        viewBoxProducts(fromBoxId); loadBoxes();
+    } catch (e) { alert('移动失败: '+e.message); }
+}
+
+async function printProductLabel(itemId, itemName, boxLabel) {
+    showPrintToast('提交打印...');
+    try {
+        const resp = await fetch(`/api/inventory/products/${encodeURIComponent(itemId)}/print-label`, {
+            method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item_name: itemName, box_label: boxLabel })
+        });
+        if (!resp.ok) { const err = await resp.json().catch(()=>({})); showPrintToast(err.detail||'打印失败', true); return; }
+        showPrintToast('打印完成: ' + itemName, false);
+    } catch (e) { showPrintToast('打印失败: '+e.message, true); }
+}
+
+async function toggleBoxFull(id, isFull) {
+    try {
+        await fetch(`/api/inventory/boxes/${id}`, { method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ is_full: isFull }) });
+        loadBoxes();
+    } catch (e) { }
+}
+
+async function printBoxLabels(boxId) {
+    showPrintToast('提交打印任务...');
+    try {
+        const resp = await fetch(`/api/inventory/print-labels/${boxId}`, { method: 'POST', headers: authHeaders() });
+        const data = await resp.json();
+        const results = data.results || [];
+        const done = results.filter(r => r.status === 'done');
+        const errors = results.filter(r => r.status === 'error');
+        if (errors.length > 0) {
+            showPrintToast(`打印完成: ${done.length} 项成功, ${errors.length} 项失败`, true);
+        } else {
+            showPrintToast(`打印完成: 共 ${done.length} 项`, false);
+        }
+        setTimeout(() => { loadBoxes(); if (invCurrentTab === 'shipping') loadShippingList(); }, 1500);
+    } catch (e) {
+        showPrintToast('打印失败: ' + e.message, true);
+    }
+}
+
+function showPrintToast(msg, isError) {
+    let toast = document.getElementById('printToast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'printToast';
+        toast.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:9999;padding:10px 20px;border-radius:8px;color:#fff;font-size:14px;transition:opacity 0.3s;';
+        document.body.appendChild(toast);
+    }
+    toast.textContent = '🖨️ ' + msg;
+    toast.style.background = isError ? '#dc3545' : '#28a745';
+    toast.style.opacity = '1';
+    clearTimeout(toast._timer);
+    toast._timer = setTimeout(() => { toast.style.opacity = '0'; }, 4000);
+}
+
+async function loadShippingList() {
+    document.getElementById('shippingOrdersBody').innerHTML = '<tr><td colspan="5" class="text-center text-muted">加载中...</td></tr>';
+    document.getElementById('shippingBoxesCards').innerHTML = '<div class="col-12 text-muted">加载中...</div>';
+    try {
+        const resp = await fetch('/api/inventory/shipping-list', { headers: authHeaders() });
+        const data = await resp.json();
+        const orders = data.orders || [];
+        const boxSummary = data.box_summary || [];
+
+        // Stats bar
+        const unprinted = orders.filter(o => !o.label_printed).length;
+        document.getElementById('shippingStats').innerHTML =
+            `<strong>${orders.length}</strong> 订单 · <strong>${boxSummary.length}</strong> 箱 · <strong class="${unprinted > 0 ? 'text-warning' : 'text-success'}">${unprinted}</strong> 标签未打`;
+
+        // Order view
+        if (orders.length === 0) {
+            document.getElementById('shippingOrdersBody').innerHTML = '<tr><td colspan="5" class="text-center text-muted">无待发货订单</td></tr>';
+        } else {
+            document.getElementById('shippingOrdersBody').innerHTML = orders.map(o => `
+                <tr>
+                    <td><small>${escHtml(o.order_id).substring(0,12)}...</small></td>
+                    <td>${o.images && o.images.length ? `<img src="${escHtml(o.images[0])}_80x80.jpg" style="width:36px;height:36px;object-fit:cover;border-radius:4px;margin-right:6px">` : ''}${escHtml(o.item_title)}</td>
+                    <td>${o.amount ? '¥'+o.amount : ''}</td>
+                    <td>${escHtml(o.box_label)}</td>
+                    <td>${o.label_printed ? '<span class="badge bg-success">已打</span>' : `<span class="badge bg-warning">未打</span> ${o.box_id ? `<button class="btn btn-sm btn-outline-warning ms-1" onclick="printBoxLabels(${o.box_id})" title="补打"><i class="bi bi-printer"></i></button>` : ''}`}</td>
+                </tr>
+            `).join('');
+        }
+        // Box view
+        const cardsDiv = document.getElementById('shippingBoxesCards');
+        if (boxSummary.length === 0) {
+            cardsDiv.innerHTML = '<div class="col-12 text-muted">无待发货箱子</div>';
+        } else {
+            cardsDiv.innerHTML = boxSummary.map(b => `
+                <div class="col-md-6 mb-3">
+                  <div class="card h-100">
+                    <div class="card-header py-1 d-flex justify-content-between align-items-center">
+                      <strong>${escHtml(b.box_label)}</strong>
+                      <small class="text-muted">${escHtml(b.location)}</small>
+                    </div>
+                    <div class="card-body py-2">
+                      <ul class="list-unstyled mb-1 small">
+                        ${(b.products || []).map(p => `<li>📦 ${escHtml(p)}</li>`).join('')}
+                      </ul>
+                    </div>
+                    <div class="card-footer py-1 d-flex justify-content-between align-items-center">
+                      <span class="small">今日需取: <strong>${b.pick_count}</strong> 件</span>
+                      <button class="btn btn-sm btn-outline-warning" onclick="printBoxLabels(${b.box_id})"><i class="bi bi-printer"></i></button>
+                    </div>
+                  </div>
+                </div>
+            `).join('');
+        }
+    } catch (e) {
+        document.getElementById('shippingOrdersBody').innerHTML = `<tr><td colspan="5" class="text-danger">加载失败: ${escHtml(e.message)}</td></tr>`;
+    }
+}
+
+let shippingViewMode = 'orders';
+function toggleShippingView() {
+    shippingViewMode = shippingViewMode === 'orders' ? 'boxes' : 'orders';
+    document.getElementById('shipping-orders-view').style.display = shippingViewMode === 'orders' ? '' : 'none';
+    document.getElementById('shipping-boxes-view').style.display = shippingViewMode === 'boxes' ? '' : 'none';
+    document.getElementById('shippingViewLabel').textContent = `视图: ${shippingViewMode === 'orders' ? '按订单' : '按箱子'}`;
+}
+
+function authHeaders() {
+    const token = localStorage.getItem('auth_token') || '';
+    return { 'Authorization': `Bearer ${token}` };
+}
+
+function escHtml(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// Initialize template select on page load
+document.addEventListener('DOMContentLoaded', function () {
+    const origInit = window.initApp;
+});
+
+// ---- 自动分箱 ----
+
+async function runAutoBox() {
+    try {
+        const resp = await fetch('/api/inventory/auto-box', { method: 'POST', headers: authHeaders() });
+        const data = await resp.json();
+        showAutoBoxResult(data);
+    } catch (e) { alert('自动分箱失败: ' + e.message); }
+}
+
+function showAutoBoxResult(data) {
+    document.getElementById('autobox-result').style.display = '';
+    document.getElementById('autobox-summary').innerHTML =
+        `总计: <strong>${data.total}</strong> 件 &nbsp;|&nbsp; 已分配: <strong class="text-success">${data.assigned}</strong> &nbsp;|&nbsp; 溢出: <strong class="text-warning">${data.overflow}</strong> &nbsp;|&nbsp; 未匹配: <strong class="text-danger">${data.unmatched}</strong>`;
+
+    let html = '';
+    (data.overflow_detail || []).forEach(d => {
+        html += `<tr><td>${escHtml(d.item_title)}</td><td><span class="badge bg-warning">溢出</span></td><td>已满箱: ${escHtml(d.matched_boxes.join(', '))}</td><td>--</td></tr>`;
+    });
+    (data.unmatched_items || []).forEach(d => {
+        html += `<tr><td>${escHtml(d.item_title)}</td><td><span class="badge bg-danger">未匹配</span></td><td>无适用规则</td><td>--</td></tr>`;
+    });
+    if (!html) html = '<tr><td colspan="4" class="text-center text-success">全部商品已分配！</td></tr>';
+    document.getElementById('autoboxDetailBody').innerHTML = html;
+}
+
+function showReboxConfirm() {
+    document.getElementById('reboxConfirmText').value = '';
+    new bootstrap.Modal(document.getElementById('reboxConfirmModal')).show();
+}
+
+async function doReboxAll() {
+    const text = document.getElementById('reboxConfirmText').value.trim();
+    if (text !== '我确认删除所有映射') { alert('确认文本不匹配'); return; }
+    try {
+        const resp = await fetch('/api/inventory/rebox-all', {
+            method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirm: text })
+        });
+        if (!resp.ok) { const err = await resp.json().catch(() => ({})); alert(err.detail || '操作失败'); return; }
+        const data = await resp.json();
+        bootstrap.Modal.getInstance(document.getElementById('reboxConfirmModal')).hide();
+        showAutoBoxResult(data);
+    } catch (e) { alert('重新分箱失败: ' + e.message); }
+}
+
+// ---- 商品列表 (SKU 折叠) ----
+
+async function loadInventoryProducts() {
+    const cardsDiv = document.getElementById('inventoryProductsCards');
+    cardsDiv.innerHTML = '<div class="col-12 text-center text-muted py-4">加载中...</div>';
+    try {
+        const resp = await fetch('/api/inventory/parent-products', { headers: authHeaders() });
+        const data = await resp.json();
+        const products = data.products || [];
+        if (products.length === 0) {
+            cardsDiv.innerHTML = '<div class="col-12 text-muted">暂无商品数据（需先从闲鱼同步商品信息）</div>';
+            return;
+        }
+        cardsDiv.innerHTML = products.map(p => {
+            const isMulti = p.sku_count > 1;
+            const skuRows = p.skus.map(s => `
+                <tr>
+                    <td><small>${escHtml(s.props_text) || '默认'}</small></td>
+                    <td>${s.price ? '¥'+s.price : ''}</td>
+                    <td>${s.stock || '-'}</td>
+                </tr>
+            `).join('');
+            const firstImg = (p.images && p.images.length) ? p.images[0] : '';
+            return `
+            <div class="col-md-6 col-lg-4 mb-3">
+              <div class="card h-100 d-flex flex-column">
+                <div class="card-header py-1 d-flex justify-content-between align-items-start">
+                  <span class="small fw-bold" style="max-width:70%;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.3">${escHtml(p.title)}</span>
+                  ${isMulti ? '<span class="badge bg-info">'+p.sku_count+'规格</span>' : '<span class="badge bg-secondary">单规格</span>'}
+                </div>
+                <div class="card-body px-2 flex-grow-0" style="padding-top:2px;padding-bottom:2px">
+                  ${isMulti ? `
+                  <button class="btn btn-sm btn-outline-secondary w-100 mb-1" data-bs-toggle="collapse" data-bs-target="#sku-collapse-${p.id}">
+                    展开规格 (${p.sku_count}) <i class="bi bi-chevron-down"></i>
+                  </button>
+                  <div class="collapse" id="sku-collapse-${p.id}">
+                    <table class="table table-sm mb-0 small">
+                      <thead><tr><th>规格</th><th>价格</th><th>库存</th></tr></thead>
+                      <tbody>${skuRows}</tbody>
+                    </table>
+                  </div>
+                  ` : `<span class="text-muted small">${p.skus[0]?.price ? '¥'+p.skus[0].price : ''}</span>`}
+                </div>
+                <div class="card-footer px-2 small flex-grow-0" style="padding-top:2px;padding-bottom:2px;border-top:none">${p.box_label ? `<span class="text-primary" style="cursor:pointer" onclick="editBox(${p.box_id})" title="点击查看箱子">📦 ${escHtml(p.box_label)}</span>` : '<span class="text-warning">⚠ 未分配</span>'}</div>
+                ${firstImg ? `<img src="${escHtml(firstImg)}" class="card-img-bottom mt-auto" style="width:100%;aspect-ratio:1/1;object-fit:contain;background-color:#f8f9fa" alt="${escHtml(p.title)}" onerror="this.style.display='none'">` : '<div class="mt-auto" style="width:100%;aspect-ratio:1/1;background-color:#f8f9fa"></div>'}
+              </div>
+            </div>`;
+        }).join('');
+    } catch (e) {
+        cardsDiv.innerHTML = '<div class="col-12 text-danger">加载失败: ' + escHtml(e.message) + '</div>';
     }
 }

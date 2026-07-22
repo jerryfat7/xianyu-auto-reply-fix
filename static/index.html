@@ -193,6 +193,13 @@
         </div>
       </div>
 
+      <!-- 库存管理 -->
+      <div class="nav-item" data-menu-id="inventory">
+        <a href="javascript:void(0)" class="nav-link" onclick="showSection('inventory')">
+          <i class="bi bi-boxes"></i>
+          <span>库存管理</span>
+        </a>
+      </div>
       <div class="nav-item" data-menu-id="about">
         <a href="javascript:void(0)" class="nav-link" onclick="showSection('about')">
           <i class="bi bi-info-circle"></i>
@@ -4092,6 +4099,101 @@
           <p class="about-donate-sub">感谢每一份支持，你的鼓励是持续维护的动力。</p>
         </div>
 
+      </div>
+    </div>
+
+    <!-- 库存管理内容 -->
+    <div id="inventory-section" class="content-section">
+      <div class="content-header">
+        <h2 class="mb-0"><i class="bi bi-boxes me-2"></i>库存管理</h2>
+        <p class="text-muted mb-0">管理箱子、商品映射和发货清单</p>
+      </div>
+      <div class="content-body">
+        <ul class="nav nav-tabs mb-3" id="inventoryTabs">
+          <li class="nav-item"><a class="nav-link active" href="javascript:void(0)" onclick="showInventoryTab('boxes')"><i class="bi bi-archive"></i> 箱子管理</a></li>
+          <li class="nav-item"><a class="nav-link" href="javascript:void(0)" onclick="showInventoryTab('products')"><i class="bi bi-grid"></i> 商品列表</a></li>
+          <li class="nav-item"><a class="nav-link" href="javascript:void(0)" onclick="showInventoryTab('autobox')"><i class="bi bi-magic"></i> 自动分箱</a></li>
+          <li class="nav-item"><a class="nav-link" href="javascript:void(0)" onclick="showInventoryTab('shipping')"><i class="bi bi-truck"></i> 发货清单</a></li>
+        </ul>
+        <div id="inv-tab-boxes">
+          <div class="card mb-3"><div class="card-body py-2">
+            <button class="btn btn-primary btn-sm" onclick="showBoxForm()"><i class="bi bi-plus-lg"></i> 新建箱子</button>
+            <button class="btn btn-outline-secondary btn-sm ms-2" onclick="loadBoxes()"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
+          </div></div>
+          <div class="card"><div class="table-responsive"><table class="table table-hover mb-0">
+            <thead><tr><th>标签</th><th>类型</th><th>IP</th><th>品类</th><th>容量</th><th>状态</th><th>优先级</th><th>位置</th><th>操作</th></tr></thead>
+            <tbody id="boxesTableBody"><tr><td colspan="9" class="text-center text-muted">加载中...</td></tr></tbody>
+          </table></div></div>
+        </div>
+        <div id="inv-tab-products" style="display:none">
+          <div class="card mb-3"><div class="card-body py-2">
+            <button class="btn btn-primary btn-sm" onclick="loadInventoryProducts()"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
+            <span class="ms-3 small text-muted">商品列表（SKU 折叠展开）</span>
+          </div></div>
+          <div class="row" id="inventoryProductsCards"></div>
+        </div>
+        <div id="inv-tab-autobox" style="display:none">
+          <div class="card mb-3"><div class="card-body py-2">
+            <button class="btn btn-success btn-sm" onclick="runAutoBox()"><i class="bi bi-magic"></i> 执行自动分箱</button>
+            <button class="btn btn-outline-danger btn-sm ms-2" onclick="showReboxConfirm()"><i class="bi bi-arrow-repeat"></i> 重新分箱</button>
+            <span class="ms-3 small text-muted">自动分箱仅处理未分配商品；重新分箱清空所有映射后全量重排。</span>
+          </div></div>
+          <div id="autobox-result" style="display:none"><div class="card border-success mb-3"><div class="card-body py-2"><span id="autobox-summary"></span></div></div>
+          <div class="card"><div class="card-header">详细信息</div><div class="table-responsive"><table class="table table-sm mb-0">
+            <thead><tr><th>商品</th><th>状态</th><th>详情</th><th>操作</th></tr></thead>
+            <tbody id="autoboxDetailBody"></tbody>
+          </table></div></div></div>
+        </div>
+        <div id="inv-tab-shipping" style="display:none">
+          <div class="card mb-3"><div class="card-body py-2">
+            <button class="btn btn-primary btn-sm" onclick="loadShippingList()"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
+            <span class="ms-3 small text-muted" id="shippingViewLabel">视图: 按订单</span>
+            <button class="btn btn-outline-secondary btn-sm ms-2" onclick="toggleShippingView()">切换视图</button>
+            <span class="ms-3 small" id="shippingStats"></span>
+          </div></div>
+          <div id="shipping-orders-view"><div class="card"><div class="table-responsive"><table class="table table-hover mb-0">
+            <thead><tr><th>订单ID</th><th>商品</th><th>金额</th><th>所在箱子</th><th>标签</th></tr></thead>
+            <tbody id="shippingOrdersBody"><tr><td colspan="5" class="text-center text-muted">点击刷新加载</td></tr></tbody>
+          </table></div></div></div>
+          <div id="shipping-boxes-view" style="display:none"><div class="row" id="shippingBoxesCards"></div></div>
+        </div>
+        <!-- 箱子弹窗 -->
+        <div class="modal fade" id="boxFormModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">
+          <div class="modal-header"><h5 class="modal-title" id="boxFormTitle">新建箱子</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+          <div class="modal-body">
+            <input type="hidden" id="boxFormId"><input type="hidden" id="boxFormIsFull" value="0">
+            <div class="mb-2"><label class="form-label small">从模板</label><select class="form-select form-select-sm" id="boxFormTemplate" onchange="applyBoxTemplate()"><option value="">-- 手动填写 --</option></select></div>
+            <div class="mb-2"><label class="form-label small">名称 *</label><input class="form-control form-control-sm" id="boxFormLabel" placeholder="小盒A-RE0吧唧"></div>
+            <div class="row g-2 mb-2"><div class="col-6"><label class="form-label small">类型</label><input class="form-control form-control-sm" id="boxFormType" placeholder="小盒"></div><div class="col-6"><label class="form-label small">容量</label><input class="form-control form-control-sm" id="boxFormCapacity" type="number" placeholder="40"></div></div>
+            <div class="mb-2"><label class="form-label small">IP (逗号分隔, *=通配)</label><input class="form-control form-control-sm" id="boxFormIp" value="*"></div>
+            <div class="mb-2"><label class="form-label small">品类 (逗号分隔, *=通配)</label><input class="form-control form-control-sm" id="boxFormCat" value="*"></div>
+            <div class="row g-2 mb-2"><div class="col-6"><label class="form-label small">位置</label><input class="form-control form-control-sm" id="boxFormLocation" placeholder="书桌左抽屉"></div><div class="col-6"><label class="form-label small">优先级</label><input class="form-control form-control-sm" id="boxFormPriority" type="number" value="0"></div></div>
+          </div>
+          <div class="modal-footer"><button class="btn btn-warning btn-sm" id="boxFormReleaseBtn" style="display:none" onclick="releaseDefaultBox()">释放全部商品</button><button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button><button class="btn btn-primary btn-sm" onclick="saveBox()">保存</button></div>
+        </div></div></div>
+        <!-- 重新分箱确认弹窗 -->
+        <div class="modal fade" id="reboxConfirmModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">
+          <div class="modal-header bg-danger text-white"><h5 class="modal-title">⚠️ 重新分箱</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+          <div class="modal-body"><p>清空所有映射后按当前规则重新匹配全部商品。<strong>不可撤销。</strong></p>
+          <label class="form-label">请输入 <code>我确认删除所有映射</code>：</label>
+          <input class="form-control" id="reboxConfirmText" placeholder="我确认删除所有映射"></div>
+          <div class="modal-footer"><button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">取消</button><button class="btn btn-danger btn-sm" onclick="doReboxAll()">我确认重新分箱</button></div>
+        </div></div></div>
+        <!-- 箱内商品查看弹窗 -->
+        <div class="modal fade" id="boxProductsModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content">
+          <div class="modal-header"><h5 class="modal-title" id="boxProductsTitle">📦 箱子名称</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+          <div class="modal-body py-1">
+            <div class="small text-muted mb-2" id="boxProductsMeta"></div>
+            <div class="table-responsive" style="max-height:60vh;overflow-y:auto">
+              <table class="table table-hover table-sm mb-0">
+                <thead><tr><th style="width:56px"></th><th>商品</th><th style="width:80px">价格</th><th style="width:160px">操作</th></tr></thead>
+                <tbody id="boxProductsTbody"><tr><td colspan="4" class="text-center text-muted">加载中...</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="modal-footer"><span class="small me-auto" id="boxProductsCount"></span><button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">关闭</button></div>
+        </div></div></div>
+        </div></div></div>
       </div>
     </div>
 

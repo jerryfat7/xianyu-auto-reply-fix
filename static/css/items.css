@@ -28,6 +28,11 @@
 
 /* 表格操作列样式 */
 .table td:last-child {
+  white-space: nowrap;
+}
+.table td:last-child .btn {
+  margin-right: 2px;
+}
   text-align: center;
   vertical-align: middle;
   padding: 0.5rem 0.25rem;
