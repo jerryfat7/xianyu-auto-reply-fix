@@ -9232,18 +9232,25 @@ class XianyuLive:
             logger.error(f"保存商品信息到数据库异常: {self._safe_str(e)}")
 
     async def save_item_detail_only(self, item_id, item_detail):
-        """仅保存商品详情（不影响标题等基本信息）"""
+        """仅保存商品详情（不影响标题等基本信息）。
+        如果 item_detail 已是 JSON 则不覆盖。"""
         try:
             from db_manager import db_manager
+            import json as _json
 
-            # 使用专门的详情更新方法
+            # 如果当前已有 JSON 格式的详情，不覆盖
+            existing = db_manager.get_item_info(self.cookie_id, item_id)
+            if existing and existing.get('item_detail'):
+                try:
+                    _json.loads(existing['item_detail'])
+                    logger.debug(f"商品 {item_id} 已有 JSON 格式详情，跳过纯文本覆盖")
+                    return True
+                except Exception:
+                    pass
+
             success = db_manager.update_item_detail(self.cookie_id, item_id, item_detail)
-
             if success:
                 logger.info(f"商品详情已更新: {item_id}")
-            else:
-                logger.warning(f"更新商品详情失败: {item_id}")
-
             return success
 
         except Exception as e:
@@ -9525,6 +9532,50 @@ class XianyuLive:
                 logger.warning(f"停止playwright时出错: {self._safe_str(e)}")
 
 
+    def _extract_images_from_pic_info(self, pic_info) -> list:
+        """从 Xianyu API 的 picInfo 中提取图片 URL 列表。"""
+        images = []
+        if not pic_info or not isinstance(pic_info, dict):
+            return images
+
+        # 1. 直接 URL 字段
+        direct_url = pic_info.get('picUrl') or pic_info.get('pic_url') or ''
+        if direct_url and direct_url.startswith('http'):
+            images.append(direct_url)
+
+        # 2. imageInfos JSON 字符串（在 detail_params 中）
+        #   格式: [{"url":"http://...", "major":true, ...}, ...]
+        image_infos_str = pic_info.get('imageInfos', '')
+        if isinstance(image_infos_str, str) and image_infos_str:
+            try:
+                import json
+                infos = json.loads(image_infos_str)
+                for info in infos:
+                    url = info.get('url', '')
+                    if url and url.startswith('http') and url not in images:
+                        images.append(url)
+            except Exception:
+                pass
+
+        # 3. picList / pic_list / pics 列表
+        pic_list = (pic_info.get('picList') or pic_info.get('pic_list') or
+                    pic_info.get('pics') or [])
+        if isinstance(pic_list, list):
+            for pic in pic_list:
+                if isinstance(pic, str) and pic.startswith('http') and pic not in images:
+                    images.append(pic)
+                elif isinstance(pic, dict):
+                    url = pic.get('url') or pic.get('picUrl') or ''
+                    if url.startswith('http') and url not in images:
+                        images.append(url)
+
+        # 4. 补充主图
+        main_pic = pic_info.get('mainPic') or pic_info.get('main_pic') or ''
+        if main_pic and main_pic.startswith('http') and main_pic not in images:
+            images.insert(0, main_pic)
+
+        return images
+
     async def save_items_list_to_db(self, items_list, sync_item_details=False):
         """批量保存商品列表信息到数据库（并发安全）
 
@@ -9565,13 +9616,18 @@ class XianyuLive:
                 existing_item = db_manager.get_item_info(self.cookie_id, item_id)
                 
                 if existing_item:
-                    # 商品已存在，先更新标题和价格；商品详情按同步模式单独处理
+                    # 商品已存在，更新标题、价格和详情JSON
+                    existing_detail = existing_item.get('item_detail', '')
+                    # 检测多规格：detail_params.isSKU = "1"
+                    is_multi = 1 if item.get('detail_params', {}).get('isSKU') == '1' else 0
                     batch_update_data.append({
                         'cookie_id': self.cookie_id,
                         'item_id': item_id,
                         'item_title': item.get('title', ''),
                         'item_price': item.get('price_text', ''),
-                        'item_category': str(item.get('category_id', ''))
+                        'item_category': str(item.get('category_id', '')),
+                        'item_detail': json.dumps(item_detail, ensure_ascii=False),
+                        'is_multi_spec': is_multi,
                     })
                     if sync_item_details:
                         items_need_detail.append({
@@ -9581,14 +9637,16 @@ class XianyuLive:
                     logger.debug(f"商品 {item_id} 已存在，将更新标题和价格")
                 else:
                     # 新商品，保存所有信息
+                    is_multi_new = 1 if item.get('detail_params', {}).get('isSKU') == '1' else 0
                     batch_new_data.append({
                         'cookie_id': self.cookie_id,
                         'item_id': item_id,
                         'item_title': item.get('title', ''),
-                        'item_description': '',  # 暂时为空
+                        'item_description': '',
                         'item_category': str(item.get('category_id', '')),
                         'item_price': item.get('price_text', ''),
-                        'item_detail': json.dumps(item_detail, ensure_ascii=False)
+                        'item_detail': json.dumps(item_detail, ensure_ascii=False),
+                        'is_multi_spec': is_multi_new,
                     })
                     
                     # 新商品需要获取详情
@@ -9611,6 +9669,20 @@ class XianyuLive:
                 update_count = db_manager.batch_update_item_title_price(batch_update_data)
                 logger.info(f"更新商品标题和价格: {update_count}/{len(batch_update_data)} 个")
                 saved_count += update_count
+
+            # 从 pic_info 提取图片更新 item_parents.images
+            img_updated = 0
+            for item in items_list:
+                item_id = item.get('id')
+                if not item_id or item_id.startswith('auto_'):
+                    continue
+                pic_info = item.get('pic_info', {})
+                images = self._extract_images_from_pic_info(pic_info)
+                if images:
+                    if db_manager.upsert_parent_images(item_id, images):
+                        img_updated += 1
+            if img_updated:
+                logger.info(f"更新商品图片: {img_updated}/{len(items_list)} 个")
 
             # 异步获取商品详情
             if items_need_detail:
