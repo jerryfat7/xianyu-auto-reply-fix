@@ -23,6 +23,8 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV TZ=Asia/Shanghai
 ENV DOCKER_ENV=true
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+# Playwright 国内镜像加速
+ENV PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/
 
 #更换中科大源
 RUN sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/debian.sources

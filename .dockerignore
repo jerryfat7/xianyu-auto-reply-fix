@@ -40,6 +40,12 @@ venv.bak/
 *.swo
 *~
 
+# 运行时数据（不打包进镜像，通过 volume 挂载）
+browser_data/
+data/
+logs/
+backups/
+
 # 操作系统相关
 .DS_Store
 .DS_Store?
