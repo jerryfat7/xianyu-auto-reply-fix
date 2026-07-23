@@ -24461,7 +24461,7 @@ async function viewBoxProducts(boxId) {
             const img = (p.images && p.images.length) ? ` onerror="this.style.display='none'"` : '';
             const imgSrc = (p.images && p.images.length) ? p.images[0] : '';
             return `<tr>
-                <td>${imgSrc ? `<img src="${escHtml(imgSrc)}" style="width:48px;height:48px;object-fit:contain;background:#f8f9fa">` : ''}</td>
+                <td>${imgSrc ? `<img src="${escHtml(imgSrc)}" style="width:48px;height:48px;object-fit:contain;background:#f8f9fa;cursor:pointer" onclick="previewImage('${escHtml(imgSrc)}')">` : ''}</td>
                 <td><small class="text-truncate d-inline-block" style="max-width:260px">${escHtml(p.item_title||'')}</small></td>
                 <td><small>${p.item_price||''}</small></td>
                 <td>
@@ -24552,6 +24552,11 @@ function showPrintToast(msg, isError) {
     toast._timer = setTimeout(() => { toast.style.opacity = '0'; }, 4000);
 }
 
+function previewImage(url) {
+    document.getElementById('imagePreviewImg').src = url;
+    new bootstrap.Modal(document.getElementById('imagePreviewModal')).show();
+}
+
 async function loadShippingList() {
     document.getElementById('shippingOrdersBody').innerHTML = '<tr><td colspan="5" class="text-center text-muted">加载中...</td></tr>';
     document.getElementById('shippingBoxesCards').innerHTML = '<div class="col-12 text-muted">加载中...</div>';
@@ -24573,7 +24578,7 @@ async function loadShippingList() {
             document.getElementById('shippingOrdersBody').innerHTML = orders.map(o => `
                 <tr>
                     <td><small>${escHtml(o.order_id).substring(0,12)}...</small></td>
-                    <td>${o.images && o.images.length ? `<img src="${escHtml(o.images[0])}_80x80.jpg" style="width:36px;height:36px;object-fit:cover;border-radius:4px;margin-right:6px">` : ''}${escHtml(o.item_title)}</td>
+                    <td>${o.images && o.images.length ? `<img src="${escHtml(o.images[0])}_80x80.jpg" style="width:36px;height:36px;object-fit:cover;border-radius:4px;margin-right:6px;cursor:pointer" onclick="previewImage('${escHtml(o.images[0])}')">` : ''}${escHtml(o.item_title)}</td>
                     <td>${o.amount ? '¥'+o.amount : ''}</td>
                     <td>${escHtml(o.box_label)}</td>
                     <td>${o.label_printed ? '<span class="badge bg-success">已打</span>' : `<span class="badge bg-warning">未打</span> ${o.box_id ? `<button class="btn btn-sm btn-outline-warning ms-1" onclick="printBoxLabels(${o.box_id})" title="补打"><i class="bi bi-printer"></i></button>` : ''}`}</td>
@@ -24595,7 +24600,7 @@ async function loadShippingList() {
                     <div class="card-body py-2">
                       ${(b.products || []).map(p => `
                         <div class="d-flex align-items-center gap-2 mb-1">
-                          ${p.image ? `<img src="${escHtml(p.image)}_80x80.jpg" style="width:32px;height:32px;object-fit:cover;border-radius:4px" onerror="this.style.display='none'">` : ''}
+                          ${p.image ? `<img src="${escHtml(p.image)}_80x80.jpg" style="width:32px;height:32px;object-fit:cover;border-radius:4px;cursor:pointer" onclick="previewImage('${escHtml(p.image)}')" onerror="this.style.display='none'">` : ''}
                           <small>${escHtml(p.title)}</small>
                         </div>
                       `).join('')}
