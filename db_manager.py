@@ -12062,7 +12062,7 @@ Cookie数量: {cookie_count}
                     VALUES (?, ?, ?, ?)
                     ON CONFLICT(item_id) DO UPDATE SET
                         images = excluded.images,
-                        title = CASE WHEN COALESCE(item_parents.title, '') = '' THEN excluded.title ELSE item_parents.title END
+                        title = excluded.title
                 """, (item_id, title or '', cookie_id or '', images_json))
                 self.conn.commit()
                 return cursor.rowcount > 0
