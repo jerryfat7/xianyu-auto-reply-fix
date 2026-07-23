@@ -16353,12 +16353,11 @@ async def inventory_delete_product(item_id: str, user_info: Dict[str, Any] = Dep
 
 @app.post('/api/inventory/print-labels/{box_id}')
 async def inventory_print_labels(box_id: int, user_info: Dict[str, Any] = Depends(require_auth)):
-    """打印指定箱子的标签（箱子标签 + 箱内所有商品标签）。"""
+    """打印指定箱子的标签（仅箱子标签，不含箱内商品）。"""
     from label_print_client import get_client
     box = db_manager.get_box(box_id)
     if not box:
         raise HTTPException(404, "箱子不存在")
-    products = db_manager.get_box_products(box_id)
 
     client = get_client()
     results = []
@@ -16374,22 +16373,6 @@ async def inventory_print_labels(box_id: int, user_info: Dict[str, Any] = Depend
         results.append({"type": "box", "label": box['label'], "status": "done"})
     except Exception as e:
         results.append({"type": "box", "label": box['label'], "status": "error", "error": str(e)})
-
-    # 批量打印商品标签
-    if products:
-        try:
-            print_items = [
-                {"name": p.get('item_title', ''), "phone": p.get('item_id', ''), "address": box.get('label', '')}
-                for p in products
-            ]
-            task_id = client.print_product_labels(print_items)
-            client.wait_print_done(task_id)
-            results.append({"type": "products", "count": len(products), "status": "done"})
-            # 标记已打印
-            for p in products:
-                db_manager.mark_label_printed(p['item_id'], box_id)
-        except Exception as e:
-            results.append({"type": "products", "count": len(products), "status": "error", "error": str(e)})
 
     return {"results": results}
 
