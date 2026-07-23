@@ -16314,6 +16314,13 @@ async def inventory_sync_from_xianyu(user_info: Dict[str, Any] = Depends(require
             item_ids = result.get('item_ids', [])
             if not item_ids and result.get('items'):
                 item_ids = [item['id'] for item in result['items']]
+            logger.info(
+                f"sync-from-xianyu cookie={cid}: "
+                f"total_count={result.get('total_count', 0)}, "
+                f"item_ids_count={len(item_ids)}, "
+                f"has_items={'items' in result}, "
+                f"items_count={len(result.get('items', []))}"
+            )
             delisted = db_manager.mark_delisted_items(cid, item_ids)
             total_delisted += delisted
             account_results.append({

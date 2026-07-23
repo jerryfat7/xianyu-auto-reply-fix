@@ -11979,25 +11979,42 @@ Cookie数量: {cookie_count}
         同时同步更新 item_skus.status 和 item_info.item_status。
         返回被标记为下架的数量。"""
         if not active_item_ids:
+            logger.warning(f"mark_delisted_items: active_item_ids 为空，跳过 cookie_id={cookie_id}")
             return 0
         with self.lock:
             try:
                 cursor = self.conn.cursor()
+
+                # Debug: 统计当前 DB 中该 cookie 的商品数
+                cursor.execute("SELECT COUNT(*) FROM item_parents WHERE cookie_id = ?", (cookie_id,))
+                db_total = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM item_parents WHERE cookie_id = ? AND status = 'active'", (cookie_id,))
+                db_active = cursor.fetchone()[0]
+
                 # 构建占位符
                 placeholders = ','.join(['?'] * len(active_item_ids))
                 params = [cookie_id] + list(active_item_ids)
 
-                # 1. 恢复已重新上架的商品：status='delisted' 但 item_id 在 API 中 → active
+                # 1. 恢复已重新上架的商品
                 cursor.execute(f"""
                     UPDATE item_parents SET status='active', updated_at=CURRENT_TIMESTAMP
                     WHERE cookie_id = ? AND item_id IN ({placeholders}) AND status != 'active'
                 """, params)
+                restored = cursor.rowcount
 
-                # 2. 标记下架的商品：status='active' 但 item_id 不在 API 中 → delisted
+                # 2. 标记下架的商品
                 cursor.execute(f"""
                     UPDATE item_parents SET status='delisted', updated_at=CURRENT_TIMESTAMP
                     WHERE cookie_id = ? AND item_id NOT IN ({placeholders}) AND status = 'active'
                 """, params)
+                delisted_count = cursor.rowcount
+
+                logger.info(
+                    f"mark_delisted_items cookie={cookie_id}: "
+                    f"api_ids={len(active_item_ids)}, db_total={db_total}, db_active={db_active}, "
+                    f"restored={restored}, delisted={delisted_count}, "
+                    f"sample_ids={active_item_ids[:3]}"
+                )
                 delisted_count = cursor.rowcount
 
                 # 3. 同步 item_skus.status
