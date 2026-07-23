@@ -24678,19 +24678,92 @@ async function doReboxAll() {
 
 // ---- 商品列表 (SKU 折叠) ----
 
+let inventorySearchText = '';
+
+async function syncInventoryFromXianyu() {
+    const btn = document.getElementById('btnInventorySync');
+    const statusEl = document.getElementById('inventorySyncStatus');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="bi bi-hourglass-split"></i> 同步中...';
+    statusEl.textContent = '正在从闲鱼拉取最新商品数据...';
+
+    try {
+        const resp = await fetch('/api/inventory/sync-from-xianyu', {
+            method: 'POST',
+            headers: authHeaders()
+        });
+        const data = await resp.json();
+        if (data.success) {
+            const msg = `同步 ${data.synced} 件，下架 ${data.delisted} 件`;
+            statusEl.textContent = `✅ ${msg} (${new Date().toLocaleTimeString()})`;
+            statusEl.className = 'small text-success';
+            showToast(msg, 'success');
+        } else {
+            statusEl.textContent = `❌ ${data.message}`;
+            statusEl.className = 'small text-danger';
+            showToast(data.message || '同步失败', 'danger');
+        }
+        await loadInventoryProducts();
+    } catch (e) {
+        showToast('同步失败: ' + e.message, 'danger');
+        statusEl.textContent = '❌ 同步失败';
+        statusEl.className = 'small text-danger';
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-cloud-download"></i> 从闲鱼同步';
+    }
+}
+
+async function searchInventoryProducts() {
+    inventorySearchText = document.getElementById('inventorySearchInput').value.trim();
+    await loadInventoryProducts();
+}
+
+async function clearInventorySearch() {
+    document.getElementById('inventorySearchInput').value = '';
+    inventorySearchText = '';
+    await loadInventoryProducts();
+}
+
+async function deleteInventoryProduct(itemId, title) {
+    if (!confirm(`确定删除已下架商品「${title}」吗？\n\n将同时删除：\n• 商品详情和 SKU 数据\n• 箱子映射关系\n\n此操作不可恢复。`)) {
+        return;
+    }
+    try {
+        const resp = await fetch(`/api/inventory/products/${encodeURIComponent(itemId)}`, {
+            method: 'DELETE',
+            headers: authHeaders()
+        });
+        if (resp.ok) {
+            showToast('已删除: ' + title, 'success');
+            await loadInventoryProducts();
+        } else {
+            const err = await resp.json().catch(() => ({}));
+            showToast(err.detail || '删除失败', 'danger');
+        }
+    } catch (e) {
+        showToast('删除失败: ' + e.message, 'danger');
+    }
+}
+
 async function loadInventoryProducts() {
     const cardsDiv = document.getElementById('inventoryProductsCards');
     cardsDiv.innerHTML = '<div class="col-12 text-center text-muted py-4">加载中...</div>';
     try {
-        const resp = await fetch('/api/inventory/parent-products', { headers: authHeaders() });
+        let url = '/api/inventory/parent-products';
+        if (inventorySearchText) {
+            url += '?search=' + encodeURIComponent(inventorySearchText);
+        }
+        const resp = await fetch(url, { headers: authHeaders() });
         const data = await resp.json();
         const products = data.products || [];
         if (products.length === 0) {
-            cardsDiv.innerHTML = '<div class="col-12 text-muted">暂无商品数据（需先从闲鱼同步商品信息）</div>';
+            cardsDiv.innerHTML = '<div class="col-12 text-muted">' + (inventorySearchText ? '没有匹配的商品' : '暂无商品数据（需先从闲鱼同步商品信息）') + '</div>';
             return;
         }
         cardsDiv.innerHTML = products.map(p => {
             const isMulti = p.sku_count > 1;
+            const isDelisted = p.is_delisted;
             const skuRows = p.skus.map(s => `
                 <tr>
                     <td><small>${escHtml(s.props_text) || '默认'}</small></td>
@@ -24701,10 +24774,10 @@ async function loadInventoryProducts() {
             const firstImg = (p.images && p.images.length) ? p.images[0] : '';
             return `
             <div class="col-md-6 col-lg-4 mb-3">
-              <div class="card h-100 d-flex flex-column">
+              <div class="card h-100 d-flex flex-column ${isDelisted ? 'opacity-50' : ''}">
                 <div class="card-header py-1 d-flex justify-content-between align-items-start">
                   <span class="small fw-bold" style="max-width:70%;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.3">${escHtml(p.title)}</span>
-                  ${isMulti ? '<span class="badge bg-info">'+p.sku_count+'规格</span>' : '<span class="badge bg-secondary">单规格</span>'}
+                  ${isDelisted ? '<span class="badge bg-danger">已下架</span>' : (isMulti ? '<span class="badge bg-info">'+p.sku_count+'规格</span>' : '<span class="badge bg-secondary">单规格</span>')}
                 </div>
                 <div class="card-body px-2 flex-grow-0" style="padding-top:2px;padding-bottom:2px">
                   ${isMulti ? `
@@ -24719,7 +24792,11 @@ async function loadInventoryProducts() {
                   </div>
                   ` : `<span class="text-muted small">${p.skus[0]?.price ? '¥'+p.skus[0].price : ''}</span>`}
                 </div>
-                <div class="card-footer px-2 small flex-grow-0" style="padding-top:2px;padding-bottom:2px;border-top:none">${p.box_label ? `<span class="text-primary" style="cursor:pointer" onclick="editBox(${p.box_id})" title="点击查看箱子">📦 ${escHtml(p.box_label)}</span>` : '<span class="text-warning">⚠ 未分配</span>'}</div>
+                <div class="card-footer px-2 small flex-grow-0" style="padding-top:2px;padding-bottom:2px;border-top:none">
+                  ${p.box_label ? `<span class="text-primary" style="cursor:pointer" onclick="editBox(${p.box_id})" title="点击查看箱子">📦 ${escHtml(p.box_label)}</span>` : '<span class="text-warning">⚠ 未分配</span>'}
+                  <button class="btn btn-outline-warning btn-sm py-0 ms-1" onclick="event.stopPropagation();printProductLabel('${escHtml(p.item_id)}','${escHtml(p.title).replace(/'/g,"\\'")}','${escHtml(p.box_label||'')}')" title="打印标签"><i class="bi bi-printer"></i></button>
+                  ${isDelisted ? `<button class="btn btn-outline-danger btn-sm py-0 ms-1" onclick="event.stopPropagation();deleteInventoryProduct('${escHtml(p.item_id)}','${escHtml(p.title).replace(/'/g,"\\'")}')" title="删除已下架商品"><i class="bi bi-trash"></i></button>` : ''}
+                </div>
                 ${firstImg ? `<img src="${escHtml(firstImg)}" class="card-img-bottom mt-auto" style="width:100%;aspect-ratio:1/1;object-fit:contain;background-color:#f8f9fa" alt="${escHtml(p.title)}" onerror="this.style.display='none'">` : '<div class="mt-auto" style="width:100%;aspect-ratio:1/1;background-color:#f8f9fa"></div>'}
               </div>
             </div>`;

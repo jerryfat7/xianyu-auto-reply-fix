@@ -4127,8 +4127,24 @@
         </div>
         <div id="inv-tab-products" style="display:none">
           <div class="card mb-3"><div class="card-body py-2">
-            <button class="btn btn-primary btn-sm" onclick="loadInventoryProducts()"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
-            <span class="ms-3 small text-muted">商品列表（SKU 折叠展开）</span>
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <button class="btn btn-sm btn-outline-primary" onclick="syncInventoryFromXianyu()" id="btnInventorySync">
+                <i class="bi bi-cloud-download"></i> 从闲鱼同步
+              </button>
+              <div class="input-group input-group-sm" style="max-width:260px">
+                <span class="input-group-text"><i class="bi bi-search"></i></span>
+                <input type="text" class="form-control" id="inventorySearchInput"
+                       placeholder="搜索标题或商品ID..."
+                       onkeydown="if(event.key==='Enter')searchInventoryProducts()">
+                <button class="btn btn-outline-secondary" onclick="searchInventoryProducts()" title="搜索">
+                  <i class="bi bi-search"></i>
+                </button>
+                <button class="btn btn-outline-secondary" onclick="clearInventorySearch()" title="清除">
+                  <i class="bi bi-x-lg"></i>
+                </button>
+              </div>
+              <span id="inventorySyncStatus" class="small text-muted"></span>
+            </div>
           </div></div>
           <div class="row" id="inventoryProductsCards"></div>
         </div>

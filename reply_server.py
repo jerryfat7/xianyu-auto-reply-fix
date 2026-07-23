@@ -16274,10 +16274,79 @@ async def inventory_unmatched(user_info: Dict[str, Any] = Depends(require_auth))
 # ---- 打印标签 ----
 
 @app.get('/api/inventory/parent-products')
-async def inventory_parent_products(user_info: Dict[str, Any] = Depends(require_auth)):
-    """获取父商品列表（含 SKU 子列表）。"""
-    products = db_manager.get_parent_products()
+async def inventory_parent_products(search: str = '', user_info: Dict[str, Any] = Depends(require_auth)):
+    """获取父商品列表（含 SKU 子列表），支持搜索。"""
+    products = db_manager.get_parent_products(search_text=search)
     return {"products": products}
+
+
+# ---- 从闲鱼同步商品 ----
+
+@app.post('/api/inventory/sync-from-xianyu')
+async def inventory_sync_from_xianyu(user_info: Dict[str, Any] = Depends(require_auth)):
+    """从闲鱼同步所有账号的在售商品，并标记下架。"""
+    from XianyuAutoAsync import XianyuLive
+
+    cookie_ids = db_manager.get_active_cookie_ids()
+    if not cookie_ids:
+        return {"success": False, "message": "没有可用的闲鱼账号"}
+
+    total_synced = 0
+    total_delisted = 0
+    account_results = []
+
+    for cid in cookie_ids:
+        try:
+            cookie_info = db_manager.get_cookie_by_id(cid)
+            if not cookie_info or not cookie_info.get('cookies_str'):
+                continue
+
+            xianyu = XianyuLive(cookie_info['cookies_str'], cid, register_instance=False)
+            result = await xianyu.get_all_items(sync_item_details=True)
+            await xianyu.close_session()
+
+            if result.get('error'):
+                account_results.append({"cookie_id": cid, "error": result['error']})
+                continue
+
+            total_synced += result.get('total_count', 0)
+            item_ids = result.get('item_ids', [])
+            delisted = db_manager.mark_delisted_items(cid, item_ids)
+            total_delisted += delisted
+            account_results.append({
+                "cookie_id": cid,
+                "synced": result.get('total_count', 0),
+                "delisted": delisted,
+            })
+        except Exception as e:
+            logger.error(f"同步账号 {cid} 失败: {e}")
+            account_results.append({"cookie_id": cid, "error": str(e)})
+
+    return {
+        "success": True,
+        "synced": total_synced,
+        "delisted": total_delisted,
+        "accounts": account_results,
+    }
+
+
+# ---- 删除已下架商品 ----
+
+@app.delete('/api/inventory/products/{item_id}')
+async def inventory_delete_product(item_id: str, user_info: Dict[str, Any] = Depends(require_auth)):
+    """删除已下架商品（含箱子映射、父商品、SKU、详情）。"""
+    # 校验是否为已下架状态
+    parents = db_manager.get_parent_products(search_text=item_id)
+    parent = next((p for p in parents if p['item_id'] == item_id), None)
+    if not parent:
+        raise HTTPException(404, "商品不存在")
+    if not parent.get('is_delisted'):
+        raise HTTPException(400, "仅允许删除已下架商品")
+
+    ok = db_manager.delete_delisted_product(item_id)
+    if ok:
+        return {"message": "已删除"}
+    raise HTTPException(500, "删除失败")
 
 
 # ---- 打印标签 ----

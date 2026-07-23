@@ -11898,20 +11898,32 @@ Cookie数量: {cookie_count}
 
     # ---- SKU 查询 ----
 
-    def get_parent_products(self, cookie_id: str = '') -> list[dict]:
+    def get_parent_products(self, cookie_id: str = '', search_text: str = '') -> list[dict]:
         """获取父商品列表（含 SKU 子列表）。"""
         with self.lock:
             cursor = self.conn.cursor()
             if cookie_id:
-                cursor.execute("""
-                    SELECT id, item_id, title, images, props, cookie_id, status, created_at
-                    FROM item_parents WHERE cookie_id = ? ORDER BY title
-                """, (cookie_id,))
+                if search_text:
+                    cursor.execute("""
+                        SELECT id, item_id, title, images, props, cookie_id, status, created_at
+                        FROM item_parents WHERE cookie_id = ? AND (title LIKE ? OR item_id LIKE ?) ORDER BY title
+                    """, (cookie_id, f'%{search_text}%', f'%{search_text}%'))
+                else:
+                    cursor.execute("""
+                        SELECT id, item_id, title, images, props, cookie_id, status, created_at
+                        FROM item_parents WHERE cookie_id = ? ORDER BY title
+                    """, (cookie_id,))
             else:
-                cursor.execute("""
-                    SELECT id, item_id, title, images, props, cookie_id, status, created_at
-                    FROM item_parents ORDER BY title
-                """)
+                if search_text:
+                    cursor.execute("""
+                        SELECT id, item_id, title, images, props, cookie_id, status, created_at
+                        FROM item_parents WHERE title LIKE ? OR item_id LIKE ? ORDER BY title
+                    """, (f'%{search_text}%', f'%{search_text}%'))
+                else:
+                    cursor.execute("""
+                        SELECT id, item_id, title, images, props, cookie_id, status, created_at
+                        FROM item_parents ORDER BY title
+                    """)
             parents = []
             for r in cursor.fetchall():
                 pid = r[0]
@@ -11939,8 +11951,93 @@ Cookie数量: {cookie_count}
                     'skus': skus, 'sku_count': len(skus),
                     'box_id': box_row[0] if box_row else None,
                     'box_label': box_row[1] if box_row else '',
+                    'is_delisted': (r[6] == 'delisted'),
                 })
             return parents
+
+    def mark_delisted_items(self, cookie_id: str, active_item_ids: list) -> int:
+        """标记下架商品：API 中不存在的标记为 delisted，API 中有但已下架的恢复为 active。
+        同时同步更新 item_skus.status 和 item_info.item_status。
+        返回被标记为下架的数量。"""
+        if not active_item_ids:
+            return 0
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                # 构建占位符
+                placeholders = ','.join(['?'] * len(active_item_ids))
+                params = [cookie_id] + list(active_item_ids)
+
+                # 1. 恢复已重新上架的商品：status='delisted' 但 item_id 在 API 中 → active
+                cursor.execute(f"""
+                    UPDATE item_parents SET status='active', updated_at=CURRENT_TIMESTAMP
+                    WHERE cookie_id = ? AND item_id IN ({placeholders}) AND status != 'active'
+                """, params)
+
+                # 2. 标记下架的商品：status='active' 但 item_id 不在 API 中 → delisted
+                cursor.execute(f"""
+                    UPDATE item_parents SET status='delisted', updated_at=CURRENT_TIMESTAMP
+                    WHERE cookie_id = ? AND item_id NOT IN ({placeholders}) AND status = 'active'
+                """, params)
+                delisted_count = cursor.rowcount
+
+                # 3. 同步 item_skus.status
+                cursor.execute("""
+                    UPDATE item_skus SET status='delisted'
+                    WHERE parent_id IN (SELECT id FROM item_parents WHERE cookie_id=? AND status='delisted')
+                """, (cookie_id,))
+                cursor.execute("""
+                    UPDATE item_skus SET status='active'
+                    WHERE parent_id IN (SELECT id FROM item_parents WHERE cookie_id=? AND status='active')
+                """, (cookie_id,))
+
+                # 4. 同步 item_info.item_status（0=在售，-1=下架）
+                cursor.execute(f"""
+                    UPDATE item_info SET item_status = -1
+                    WHERE cookie_id = ? AND item_id IN (
+                        SELECT item_id FROM item_parents WHERE cookie_id=? AND status='delisted'
+                    )
+                """, (cookie_id, cookie_id))
+                cursor.execute(f"""
+                    UPDATE item_info SET item_status = 0
+                    WHERE cookie_id = ? AND item_id IN (
+                        SELECT item_id FROM item_parents WHERE cookie_id=? AND status='active'
+                    )
+                """, (cookie_id, cookie_id))
+
+                self.conn.commit()
+                if delisted_count > 0:
+                    logger.info(f"账号 {cookie_id} 标记 {delisted_count} 件商品已下架")
+                return delisted_count
+            except Exception as e:
+                logger.error(f"标记下架商品失败: {e}")
+                self.conn.rollback()
+                return 0
+
+    def delete_delisted_product(self, item_id: str) -> bool:
+        """删除已下架商品（含箱子映射、父商品、SKU、详情）。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                # 1. 删除箱子映射
+                cursor.execute("DELETE FROM inventory_product_box WHERE item_id = ?", (item_id,))
+                # 2. 删除父商品（CASCADE 自动删 item_skus）
+                cursor.execute("DELETE FROM item_parents WHERE item_id = ?", (item_id,))
+                # 3. 删除商品详情
+                cursor.execute("DELETE FROM item_info WHERE item_id = ?", (item_id,))
+                self.conn.commit()
+                return True
+            except Exception as e:
+                logger.error(f"删除已下架商品失败: {e}")
+                self.conn.rollback()
+                return False
+
+    def get_active_cookie_ids(self) -> list:
+        """获取所有有效账号的 cookie_id。"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT id FROM cookies WHERE value IS NOT NULL AND value != ''")
+            return [r[0] for r in cursor.fetchall()]
 
     def upsert_parent_images(self, item_id: str, images: list, title: str = '', cookie_id: str = '') -> bool:
         """更新 item_parents 的 images 字段，插入时自动补全标题。"""

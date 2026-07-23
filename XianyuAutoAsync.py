@@ -18066,7 +18066,8 @@ class XianyuLive:
             "total_pages": page_number,
             "total_count": len(all_items),
             "total_saved": total_saved,
-            "items": all_items
+            "items": all_items,
+            "item_ids": [item['id'] for item in all_items]
         }
 
     def _get_item_polish_module(self):
