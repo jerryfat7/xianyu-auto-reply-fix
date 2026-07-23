@@ -16310,7 +16310,10 @@ async def inventory_sync_from_xianyu(user_info: Dict[str, Any] = Depends(require
                 continue
 
             total_synced += result.get('total_count', 0)
+            # 向后兼容：旧版 get_all_items 可能不返回 item_ids
             item_ids = result.get('item_ids', [])
+            if not item_ids and result.get('items'):
+                item_ids = [item['id'] for item in result['items']]
             delisted = db_manager.mark_delisted_items(cid, item_ids)
             total_delisted += delisted
             account_results.append({
