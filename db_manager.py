@@ -12090,6 +12090,25 @@ Cookie数量: {cookie_count}
                 self.conn.rollback()
                 return False
 
+    def update_single_sku_price(self, item_id: str, price: float) -> bool:
+        """更新单规格商品的 SKU 价格（仅当只有一条 SKU 记录时）。"""
+        if not item_id:
+            return False
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute("""
+                    UPDATE item_skus SET price = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE parent_id = (SELECT id FROM item_parents WHERE item_id = ?)
+                    AND (SELECT COUNT(*) FROM item_skus WHERE parent_id = (SELECT id FROM item_parents WHERE item_id = ?)) = 1
+                """, (price, item_id, item_id))
+                self.conn.commit()
+                return cursor.rowcount > 0
+            except Exception as e:
+                logger.error(f"更新单规格SKU价格失败: {e}")
+                self.conn.rollback()
+                return False
+
 
 db_manager = DBManager()
 

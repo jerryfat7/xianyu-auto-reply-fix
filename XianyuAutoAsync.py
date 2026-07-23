@@ -9683,6 +9683,23 @@ class XianyuLive:
             if img_updated:
                 logger.info(f"更新商品父记录: {img_updated}/{len(items_list)} 个")
 
+            # 同步更新单规格商品的 SKU 价格（避免详情不同步时价格落后）
+            sku_price_updated = 0
+            for item in items_list:
+                item_id = item.get('id')
+                if not item_id or item_id.startswith('auto_'):
+                    continue
+                price_text = item.get('price_text', '')
+                clean_price = str(price_text or '').replace('¥', '').replace(',', '').strip()
+                if clean_price:
+                    try:
+                        if db_manager.update_single_sku_price(item_id, float(clean_price)):
+                            sku_price_updated += 1
+                    except (ValueError, TypeError):
+                        pass
+            if sku_price_updated:
+                logger.info(f"更新单规格SKU价格: {sku_price_updated}/{len(items_list)} 个")
+
             # 异步获取商品详情
             if items_need_detail:
                 from config import config
