@@ -16302,7 +16302,7 @@ async def inventory_sync_from_xianyu(user_info: Dict[str, Any] = Depends(require
                 continue
 
             xianyu = XianyuLive(cookie_info['cookies_str'], cid, register_instance=False)
-            result = await xianyu.get_all_items(sync_item_details=True)
+            result = await xianyu.get_all_items(sync_item_details=False)
             await xianyu.close_session()
 
             if result.get('error'):
