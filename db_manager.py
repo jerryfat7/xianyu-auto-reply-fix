@@ -12040,11 +12040,12 @@ Cookie数量: {cookie_count}
             return [r[0] for r in cursor.fetchall()]
 
     def upsert_parent_images(self, item_id: str, images: list, title: str = '', cookie_id: str = '') -> bool:
-        """更新 item_parents 的 images 字段，插入时自动补全标题。"""
-        if not item_id or not images:
+        """更新 item_parents 的 images 字段，插入时自动补全标题。
+        即使 images 为空也会创建 item_parents 记录（使用空数组），确保所有商品都在库存中可见。"""
+        if not item_id:
             return False
         import json
-        images_json = json.dumps(images, ensure_ascii=False)
+        images_json = json.dumps(images or [], ensure_ascii=False)
         with self.lock:
             try:
                 cursor = self.conn.cursor()

@@ -9670,7 +9670,7 @@ class XianyuLive:
                 logger.info(f"更新商品标题和价格: {update_count}/{len(batch_update_data)} 个")
                 saved_count += update_count
 
-            # 从 pic_info 提取图片更新 item_parents.images
+            # 从 pic_info 提取图片更新 item_parents（空图片也会创建记录确保库存可见）
             img_updated = 0
             for item in items_list:
                 item_id = item.get('id')
@@ -9678,11 +9678,10 @@ class XianyuLive:
                     continue
                 pic_info = item.get('pic_info', {})
                 images = self._extract_images_from_pic_info(pic_info)
-                if images:
-                    if db_manager.upsert_parent_images(item_id, images):
-                        img_updated += 1
+                if db_manager.upsert_parent_images(item_id, images):
+                    img_updated += 1
             if img_updated:
-                logger.info(f"更新商品图片: {img_updated}/{len(items_list)} 个")
+                logger.info(f"更新商品父记录: {img_updated}/{len(items_list)} 个")
 
             # 异步获取商品详情
             if items_need_detail:
