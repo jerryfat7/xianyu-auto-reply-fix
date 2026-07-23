@@ -12027,20 +12027,6 @@ Cookie数量: {cookie_count}
                     WHERE parent_id IN (SELECT id FROM item_parents WHERE cookie_id=? AND status='active')
                 """, (cookie_id,))
 
-                # 4. 同步 item_info.item_status（0=在售，-1=下架）
-                cursor.execute(f"""
-                    UPDATE item_info SET item_status = -1
-                    WHERE cookie_id = ? AND item_id IN (
-                        SELECT item_id FROM item_parents WHERE cookie_id=? AND status='delisted'
-                    )
-                """, (cookie_id, cookie_id))
-                cursor.execute(f"""
-                    UPDATE item_info SET item_status = 0
-                    WHERE cookie_id = ? AND item_id IN (
-                        SELECT item_id FROM item_parents WHERE cookie_id=? AND status='active'
-                    )
-                """, (cookie_id, cookie_id))
-
                 self.conn.commit()
                 if delisted_count > 0:
                     logger.info(f"账号 {cookie_id} 标记 {delisted_count} 件商品已下架")
