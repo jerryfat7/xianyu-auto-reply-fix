@@ -11675,18 +11675,20 @@ Cookie数量: {cookie_count}
                 return False
 
     def get_shipping_list(self) -> dict:
-        """获取发货清单：订单视图 + 箱子核对视图（含箱内具体商品）。"""
+        """获取发货清单：订单视图 + 箱子核对视图（含箱内具体商品和图片）。"""
         with self.lock:
             cursor = self.conn.cursor()
 
-            # 订单视图
+            # 订单视图（含 item_parents 图片）
             cursor.execute('''
                 SELECT o.order_id, o.item_id, o.amount, o.order_status,
                        ii.item_title, ii.item_detail,
+                       ip.images AS parent_images,
                        b.label AS box_label, b.id AS box_id,
                        pb.label_printed
                 FROM orders o
                 JOIN item_info ii ON ii.item_id = o.item_id
+                LEFT JOIN item_parents ip ON ip.item_id = o.item_id
                 LEFT JOIN inventory_product_box pb ON pb.item_id = o.item_id
                 LEFT JOIN inventory_boxes b ON b.id = pb.box_id
                 WHERE o.order_status IN ('pending_ship', 'partial_success')
@@ -11694,45 +11696,62 @@ Cookie数量: {cookie_count}
             ''')
             orders = []
             for r in cursor.fetchall():
-                images = []
-                detail = r[5]
-                if detail:
-                    try:
-                        import json
-                        d = json.loads(detail) if isinstance(detail, str) else detail
-                        images = d.get('images', []) if isinstance(d, dict) else []
-                    except Exception:
-                        pass
+                # 优先从 item_parents 取图，回退到 item_detail
+                images = self._json_loads_safe(r[6], [])  # ip.images
+                if not images:
+                    detail = r[5]  # ii.item_detail
+                    if detail:
+                        try:
+                            import json
+                            d = json.loads(detail) if isinstance(detail, str) else detail
+                            images = d.get('images', []) if isinstance(d, dict) else []
+                        except Exception:
+                            pass
                 orders.append({
                     'order_id': r[0], 'item_id': r[1], 'amount': r[2],
                     'order_status': r[3], 'item_title': r[4] or '',
                     'images': images,
-                    'box_label': r[6] or '未知', 'box_id': r[7],
-                    'label_printed': bool(r[8]) if r[8] is not None else False,
+                    'box_label': r[7] or '未知', 'box_id': r[8],
+                    'label_printed': bool(r[9]) if r[9] is not None else False,
                 })
 
-            # 箱子核对视图
+            # 箱子核对视图（含商品图片）
             cursor.execute('''
                 SELECT b.id, b.label, b.barcode, b.location,
                        COUNT(pb.id) AS pick_count,
-                       GROUP_CONCAT(ii.item_title, '|||') AS product_names
+                       GROUP_CONCAT(pb.item_id || '$$$' || ii.item_title || '$$$' || COALESCE(ip.images,'[]'), '|||') AS product_infos
                 FROM inventory_boxes b
                 JOIN inventory_product_box pb ON pb.box_id = b.id
                 JOIN orders o ON o.item_id = pb.item_id
                     AND o.order_status IN ('pending_ship', 'partial_success')
                 JOIN item_info ii ON ii.item_id = pb.item_id
+                LEFT JOIN item_parents ip ON ip.item_id = pb.item_id
                 GROUP BY b.id
                 HAVING pick_count > 0
                 ORDER BY b.label
             ''')
-            box_summary = [
-                {
+            box_summary = []
+            for r in cursor.fetchall():
+                products = []
+                raw_infos = (r[5] or '').split('|||')
+                for info in raw_infos:
+                    parts = info.split('$$$', 2)
+                    if len(parts) >= 2:
+                        item_id = parts[0].strip()
+                        title = parts[1].strip()
+                        images = []
+                        if len(parts) >= 3:
+                            images = self._json_loads_safe(parts[2].strip(), [])
+                        products.append({
+                            'item_id': item_id,
+                            'title': title,
+                            'image': images[0] if images else '',
+                        })
+                box_summary.append({
                     'box_id': r[0], 'box_label': r[1], 'barcode': r[2],
                     'location': r[3] or '', 'pick_count': r[4],
-                    'products': [p.strip() for p in (r[5] or '').split('|||') if p.strip()],
-                }
-                for r in cursor.fetchall()
-            ]
+                    'products': products,
+                })
 
             return {'orders': orders, 'box_summary': box_summary}
 

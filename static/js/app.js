@@ -24593,9 +24593,12 @@ async function loadShippingList() {
                       <small class="text-muted">${escHtml(b.location)}</small>
                     </div>
                     <div class="card-body py-2">
-                      <ul class="list-unstyled mb-1 small">
-                        ${(b.products || []).map(p => `<li>📦 ${escHtml(p)}</li>`).join('')}
-                      </ul>
+                      ${(b.products || []).map(p => `
+                        <div class="d-flex align-items-center gap-2 mb-1">
+                          ${p.image ? `<img src="${escHtml(p.image)}_80x80.jpg" style="width:32px;height:32px;object-fit:cover;border-radius:4px" onerror="this.style.display='none'">` : ''}
+                          <small>${escHtml(p.title)}</small>
+                        </div>
+                      `).join('')}
                     </div>
                     <div class="card-footer py-1 d-flex justify-content-between align-items-center">
                       <span class="small">今日需取: <strong>${b.pick_count}</strong> 件</span>
