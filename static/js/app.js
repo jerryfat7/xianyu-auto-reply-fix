@@ -24222,7 +24222,7 @@ function showInventoryTab(tab) {
     document.getElementById('inv-tab-autobox').style.display = tab === 'autobox' ? '' : 'none';
     document.getElementById('inv-tab-shipping').style.display = tab === 'shipping' ? '' : 'none';
     if (tab === 'boxes') loadBoxes();
-    if (tab === 'products') loadInventoryProducts();
+    if (tab === 'products') { loadInventoryProducts(); initInventoryFilterDropdown(); }
     if (tab === 'autobox') { document.getElementById('autobox-result').style.display = ''; loadAutoBoxLogs(); }
     if (tab === 'shipping') loadShippingList();
 }
@@ -24796,9 +24796,18 @@ async function clearInventorySearch() {
 
 async function filterInventoryProducts(filterValue) {
     inventoryFilter = filterValue;
-    document.getElementById('inventoryFilterLabel').textContent = 
+    document.getElementById('inventoryFilterBtn').textContent = 
         filterValue === 'all' ? '全部' : (filterValue === 'delisted' ? '已下架' : '已归档');
     await loadInventoryProducts();
+}
+
+// 初始化筛选下拉框（防止被卡片遮挡）
+function initInventoryFilterDropdown() {
+    const btn = document.getElementById('inventoryFilterBtn');
+    if (!btn) return;
+    const old = bootstrap.Dropdown.getInstance(btn);
+    if (old) old.dispose();
+    new bootstrap.Dropdown(btn, { strategy: 'fixed' });
 }
 
 async function deleteInventoryProduct(itemId, title) {
