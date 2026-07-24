@@ -11372,6 +11372,9 @@ Cookie数量: {cookie_count}
         # 迁移：添加 is_default 列并创建兜底箱子
         self._migrate_default_box(cursor)
 
+        # 迁移：添加 is_archive/archived/original_box_id 列并创建归档箱
+        self._migrate_archive_box(cursor)
+
     def _migrate_default_box(self, cursor):
         """添加 is_default 列，迁移/创建兜底箱子。"""
         # 1. 添加列
@@ -11402,6 +11405,35 @@ Cookie数量: {cookie_count}
             )
             logger.info("[兜底箱子] 创建系统默认兜底箱子")
 
+    def _migrate_archive_box(self, cursor):
+        """添加 is_archive 列和归档相关字段，创建归档箱。"""
+        # 1. inventory_boxes 加 is_archive
+        try:
+            self._execute_sql(cursor, "SELECT is_archive FROM inventory_boxes LIMIT 1")
+        except sqlite3.OperationalError:
+            self._execute_sql(cursor, "ALTER TABLE inventory_boxes ADD COLUMN is_archive INTEGER DEFAULT 0")
+            logger.info("[归档箱] 添加 is_archive 列")
+
+        # 2. inventory_product_box 加 archived + original_box_id
+        try:
+            self._execute_sql(cursor, "SELECT archived FROM inventory_product_box LIMIT 1")
+        except sqlite3.OperationalError:
+            self._execute_sql(cursor, "ALTER TABLE inventory_product_box ADD COLUMN archived INTEGER DEFAULT 0")
+            logger.info("[归档箱] 添加 archived 列")
+        try:
+            self._execute_sql(cursor, "SELECT original_box_id FROM inventory_product_box LIMIT 1")
+        except sqlite3.OperationalError:
+            self._execute_sql(cursor, "ALTER TABLE inventory_product_box ADD COLUMN original_box_id INTEGER")
+            logger.info("[归档箱] 添加 original_box_id 列")
+
+        # 3. 创建归档箱（仅当不存在时）
+        cursor.execute("SELECT id FROM inventory_boxes WHERE is_archive = 1 LIMIT 1")
+        if not cursor.fetchone():
+            cursor.execute(
+                "INSERT INTO inventory_boxes (label, ip_tags, cat_tags, is_archive, priority) VALUES ('归档箱','','',1,999)"
+            )
+            logger.info("[归档箱] 创建系统归档箱")
+
     # ---- 箱子 CRUD ----
 
     def add_box(self, label: str, box_type: str = '', ip_tags: str = '*',
@@ -11430,12 +11462,12 @@ Cookie数量: {cookie_count}
             cursor.execute('''
                 SELECT b.id, b.label, b.box_type, b.ip_tags, b.cat_tags,
                        b.capacity, b.is_full, b.barcode, b.location, b.priority,
-                       b.created_at, b.updated_at, b.is_default,
+                       b.created_at, b.updated_at, b.is_default, b.is_archive,
                        COUNT(pb.id) AS product_count
                 FROM inventory_boxes b
                 LEFT JOIN inventory_product_box pb ON pb.box_id = b.id
                 GROUP BY b.id
-                ORDER BY b.priority DESC, b.id ASC
+                ORDER BY b.is_archive ASC, b.priority DESC, b.id ASC
             ''')
             rows = cursor.fetchall()
             return [self._row_to_box(r) for r in rows]
@@ -11447,7 +11479,7 @@ Cookie数量: {cookie_count}
             cursor.execute('''
                 SELECT b.id, b.label, b.box_type, b.ip_tags, b.cat_tags,
                        b.capacity, b.is_full, b.barcode, b.location, b.priority,
-                       b.created_at, b.updated_at, b.is_default,
+                       b.created_at, b.updated_at, b.is_default, b.is_archive,
                        COUNT(pb.id) AS product_count
                 FROM inventory_boxes b
                 LEFT JOIN inventory_product_box pb ON pb.box_id = b.id
@@ -11564,11 +11596,16 @@ Cookie数量: {cookie_count}
                 return False
 
     def clear_all_mappings(self) -> int:
-        """清空所有商品-箱子映射（重新分箱前调用）。"""
+        """清空在售商品的箱子映射（重新分箱前调用）。已下架/归档商品不受影响。"""
         with self.lock:
             try:
                 cursor = self.conn.cursor()
-                cursor.execute("DELETE FROM inventory_product_box")
+                cursor.execute("""
+                    DELETE FROM inventory_product_box
+                    WHERE item_id IN (
+                        SELECT item_id FROM item_parents WHERE status = 'active'
+                    )
+                """)
                 self.conn.commit()
                 return cursor.rowcount
             except Exception as e:
@@ -11577,18 +11614,20 @@ Cookie数量: {cookie_count}
                 return 0
 
     def get_box_products(self, box_id: int) -> list[dict]:
-        """获取箱子内所有商品（含 item_info 和 item_parents 数据）。"""
+        """获取箱子内所有商品（含 item_info、item_parents 和归档状态）。"""
         with self.lock:
             cursor = self.conn.cursor()
             cursor.execute('''
                 SELECT pb.id, pb.item_id, pb.box_id, pb.label_printed, pb.created_at,
                        ii.item_title, ii.item_price,
-                       COALESCE(NULLIF(ip.images,''), ii.item_detail) AS img_source
+                       COALESCE(NULLIF(ip.images,''), ii.item_detail) AS img_source,
+                       ip.status AS parent_status,
+                       pb.archived, pb.original_box_id
                 FROM inventory_product_box pb
                 LEFT JOIN item_info ii ON ii.item_id = pb.item_id
                 LEFT JOIN item_parents ip ON ip.item_id = pb.item_id
                 WHERE pb.box_id = ?
-                ORDER BY pb.created_at DESC
+                ORDER BY pb.archived ASC, pb.created_at DESC
             ''', (box_id,))
             rows = cursor.fetchall()
             result = []
@@ -11607,6 +11646,9 @@ Cookie数量: {cookie_count}
                     'label_printed': bool(r[3]), 'created_at': r[4],
                     'item_title': r[5] or '', 'item_price': r[6],
                     'images': images if isinstance(images, list) else [],
+                    'is_delisted': (r[8] == 'delisted'),
+                    'is_archived': bool(r[9]) if r[9] is not None else False,
+                    'original_box_id': r[10],
                 })
             return result
 
@@ -11684,6 +11726,7 @@ Cookie数量: {cookie_count}
                 SELECT o.order_id, o.item_id, o.amount, o.order_status,
                        ii.item_title, ii.item_detail,
                        ip.images AS parent_images,
+                       ip.status AS parent_status,
                        b.label AS box_label, b.id AS box_id,
                        pb.label_printed
                 FROM orders o
@@ -11711,8 +11754,9 @@ Cookie数量: {cookie_count}
                     'order_id': r[0], 'item_id': r[1], 'amount': r[2],
                     'order_status': r[3], 'item_title': r[4] or '',
                     'images': images,
-                    'box_label': r[7] or '未知', 'box_id': r[8],
-                    'label_printed': bool(r[9]) if r[9] is not None else False,
+                    'is_delisted': (r[7] == 'delisted'),
+                    'box_label': r[8] or '未知', 'box_id': r[9],
+                    'label_printed': bool(r[10]) if r[10] is not None else False,
                 })
 
             # 箱子核对视图（含商品图片）
@@ -11805,7 +11849,8 @@ Cookie数量: {cookie_count}
             'priority': row[9] or 0,
             'created_at': row[10], 'updated_at': row[11],
             'is_default': bool(row[12]) if len(row) > 12 else False,
-            'product_count': row[13] if len(row) > 13 else 0,
+            'is_archive': bool(row[13]) if len(row) > 13 else False,
+            'product_count': row[14] if len(row) > 14 else 0,
         }
 
     def _row_to_product_box(self, row) -> dict:
@@ -11956,9 +12001,10 @@ Cookie数量: {cookie_count}
                      'price': s[3], 'stock': s[4] or 0, 'status': s[5]}
                     for s in cursor.fetchall()
                 ]
-                # 查询商品所在箱子
+                # 查询商品所在箱子（含归档信息）
                 cursor.execute("""
-                    SELECT b.id, b.label FROM inventory_boxes b
+                    SELECT b.id, b.label, pb.archived, pb.original_box_id
+                    FROM inventory_boxes b
                     JOIN inventory_product_box pb ON pb.box_id = b.id
                     WHERE pb.item_id = ? LIMIT 1
                 """, (item_id,))
@@ -11971,6 +12017,8 @@ Cookie数量: {cookie_count}
                     'box_id': box_row[0] if box_row else None,
                     'box_label': box_row[1] if box_row else '',
                     'is_delisted': (r[6] == 'delisted'),
+                    'is_archived': bool(box_row[2]) if box_row else False,
+                    'original_box_id': box_row[3] if box_row else None,
                 })
             return parents
 
@@ -12053,6 +12101,95 @@ Cookie数量: {cookie_count}
                 logger.error(f"删除已下架商品失败: {e}")
                 self.conn.rollback()
                 return False
+
+    def get_archive_box(self) -> Optional[dict]:
+        """获取归档箱。"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT id, label FROM inventory_boxes WHERE is_archive = 1 LIMIT 1")
+            row = cursor.fetchone()
+            return {'id': row[0], 'label': row[1]} if row else None
+
+    def archive_product(self, item_id: str) -> dict:
+        """将已下架商品归档到归档箱，保存原箱引用。
+        返回 {'success': True/False, 'message': str}。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+
+                # 校验：商品必须已下架
+                cursor.execute("SELECT status FROM item_parents WHERE item_id = ?", (item_id,))
+                parent = cursor.fetchone()
+                if not parent:
+                    return {'success': False, 'message': '商品不存在'}
+                if parent[0] != 'delisted':
+                    return {'success': False, 'message': '仅允许归档已下架商品'}
+
+                # 查找当前映射
+                cursor.execute(
+                    "SELECT id, box_id, archived FROM inventory_product_box WHERE item_id = ?",
+                    (item_id,)
+                )
+                mapping = cursor.fetchone()
+                if not mapping:
+                    return {'success': False, 'message': '商品未分配箱子'}
+                if mapping[2]:
+                    return {'success': False, 'message': '商品已归档'}
+
+                # 获取归档箱
+                cursor.execute("SELECT id FROM inventory_boxes WHERE is_archive = 1")
+                archive_row = cursor.fetchone()
+                if not archive_row:
+                    return {'success': False, 'message': '归档箱不存在'}
+
+                # 归档：移到归档箱，保存原箱引用
+                cursor.execute(
+                    "UPDATE inventory_product_box SET box_id = ?, original_box_id = ?, archived = 1 WHERE id = ?",
+                    (archive_row[0], mapping[1], mapping[0])
+                )
+                self.conn.commit()
+                logger.info(f"商品 {item_id} 已归档（原箱={mapping[1]}）")
+                return {'success': True, 'message': '已归档'}
+            except Exception as e:
+                logger.error(f"归档商品失败: {e}")
+                self.conn.rollback()
+                return {'success': False, 'message': str(e)}
+
+    def restore_product(self, item_id: str) -> dict:
+        """将已归档商品恢复到原箱。
+        返回 {'success': True/False, 'message': str}。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+
+                # 查找已归档映射
+                cursor.execute(
+                    "SELECT id, original_box_id FROM inventory_product_box WHERE item_id = ? AND archived = 1",
+                    (item_id,)
+                )
+                mapping = cursor.fetchone()
+                if not mapping:
+                    return {'success': False, 'message': '商品未归档'}
+                if not mapping[1]:
+                    return {'success': False, 'message': '原箱引用丢失，无法恢复'}
+
+                # 检查原箱是否存在
+                cursor.execute("SELECT id FROM inventory_boxes WHERE id = ?", (mapping[1],))
+                if not cursor.fetchone():
+                    return {'success': False, 'message': '原箱已被删除，无法恢复'}
+
+                # 恢复到原箱
+                cursor.execute(
+                    "UPDATE inventory_product_box SET box_id = ?, original_box_id = NULL, archived = 0 WHERE id = ?",
+                    (mapping[1], mapping[0])
+                )
+                self.conn.commit()
+                logger.info(f"商品 {item_id} 已恢复到原箱 {mapping[1]}")
+                return {'success': True, 'message': '已恢复'}
+            except Exception as e:
+                logger.error(f"恢复商品失败: {e}")
+                self.conn.rollback()
+                return {'success': False, 'message': str(e)}
 
     def get_active_cookie_ids(self) -> list:
         """获取所有有效账号的 cookie_id。"""

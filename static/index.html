@@ -4143,6 +4143,14 @@
                   <i class="bi bi-x-lg"></i>
                 </button>
               </div>
+              <div class="dropdown">
+                <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" id="inventoryFilterLabel">全部</button>
+                <ul class="dropdown-menu">
+                  <li><a class="dropdown-item" href="javascript:void(0)" onclick="filterInventoryProducts('all')">全部</a></li>
+                  <li><a class="dropdown-item" href="javascript:void(0)" onclick="filterInventoryProducts('delisted')">已下架（未归档）</a></li>
+                  <li><a class="dropdown-item" href="javascript:void(0)" onclick="filterInventoryProducts('archived')">已归档</a></li>
+                </ul>
+              </div>
               <span id="inventorySyncStatus" class="small text-muted"></span>
             </div>
           </div></div>

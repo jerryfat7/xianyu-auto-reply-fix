@@ -16084,11 +16084,21 @@ async def inventory_create_box(request: Request, user_info: Dict[str, Any] = Dep
 
 @app.put('/api/inventory/boxes/{box_id}')
 async def inventory_update_box(box_id: int, request: Request, user_info: Dict[str, Any] = Depends(require_auth)):
-    """编辑箱子。兜底箱子不可修改 ip_tags/cat_tags。"""
+    """编辑箱子。兜底箱子不可修改 ip_tags/cat_tags，归档箱仅可改名。"""
     body = await request.json()
     box = db_manager.get_box(box_id)
     if not box:
         raise HTTPException(404, "箱子不存在")
+
+    # 归档箱：仅允许修改 label
+    if box.get('is_archive'):
+        if any(k in body for k in ('ip_tags', 'cat_tags', 'capacity', 'box_type', 'barcode', 'priority')):
+            raise HTTPException(400, "归档箱不可修改规则，仅可改名")
+        label = body.get('label')
+        if label:
+            ok = db_manager.update_box(box_id, label=label)
+            return {"message": "归档箱名称已更新"} if ok else HTTPException(500, "更新失败")
+        raise HTTPException(400, "无有效修改字段")
 
     new_ip = body.get('ip_tags')
     new_cat = body.get('cat_tags')
@@ -16118,12 +16128,14 @@ async def inventory_update_box(box_id: int, request: Request, user_info: Dict[st
 
 @app.delete('/api/inventory/boxes/{box_id}')
 async def inventory_delete_box(box_id: int, user_info: Dict[str, Any] = Depends(require_auth)):
-    """删除箱子。兜底箱子不可删除。"""
+    """删除箱子。兜底箱子和归档箱子不可删除。"""
     box = db_manager.get_box(box_id)
     if not box:
         raise HTTPException(404, "箱子不存在")
     if box.get('is_default'):
         raise HTTPException(400, "兜底箱子不可删除，请使用释放全部商品功能")
+    if box.get('is_archive'):
+        raise HTTPException(400, "归档箱子不可删除")
     ok = db_manager.delete_box(box_id)
     if ok:
         return {"message": "箱子删除成功"}
@@ -16357,6 +16369,42 @@ async def inventory_delete_product(item_id: str, user_info: Dict[str, Any] = Dep
     if ok:
         return {"message": "已删除"}
     raise HTTPException(500, "删除失败")
+
+
+# ---- 商品归档与恢复 ----
+
+@app.post('/api/inventory/products/{item_id}/archive')
+async def inventory_archive_product(item_id: str, user_info: Dict[str, Any] = Depends(require_auth)):
+    """归档已下架商品到归档箱。"""
+    result = db_manager.archive_product(item_id)
+    if result.get('success'):
+        return {"message": result['message']}
+    raise HTTPException(400, result.get('message', '归档失败'))
+
+
+@app.post('/api/inventory/products/archive-batch')
+async def inventory_archive_batch(request: Request, user_info: Dict[str, Any] = Depends(require_auth)):
+    """批量归档已下架商品。{item_ids: [...]}"""
+    body = await request.json()
+    item_ids = body.get('item_ids', [])
+    if not item_ids:
+        raise HTTPException(400, "缺少 item_ids")
+    results = []
+    for item_id in item_ids:
+        result = db_manager.archive_product(item_id)
+        results.append({**result, 'item_id': item_id})
+    succeeded = sum(1 for r in results if r.get('success'))
+    skipped = len(results) - succeeded
+    return {"message": f"归档完成: {succeeded} 件成功, {skipped} 件跳过", "results": results}
+
+
+@app.post('/api/inventory/products/{item_id}/restore')
+async def inventory_restore_product(item_id: str, user_info: Dict[str, Any] = Depends(require_auth)):
+    """将已归档商品恢复到原箱。"""
+    result = db_manager.restore_product(item_id)
+    if result.get('success'):
+        return {"message": result['message']}
+    raise HTTPException(400, result.get('message', '恢复失败'))
 
 
 # ---- 打印标签 ----

@@ -24239,11 +24239,19 @@ async function loadBoxes() {
             return;
         }
         tbody.innerHTML = data.boxes.map(b => {
-            const fullIcon = b.is_full ? '<span class="badge bg-danger">满</span>' : '<span class="badge bg-success">可分配</span>';
+            const isArchive = b.is_archive;
+            const isDefault = b.is_default;
+            const fullIcon = b.is_full ? '<span class="badge bg-danger">满</span>' : (isArchive ? '' : '<span class="badge bg-success">可分配</span>');
             const capText = b.capacity ? `${b.product_count}/${b.capacity}` : `${b.product_count}/-`;
-            const defaultBadge = b.is_default ? ' <span class="badge bg-warning text-dark">系统</span>' : '';
-            const deleteBtn = b.is_default ? '' : `<button class="btn btn-sm btn-outline-danger" onclick="deleteBox(${b.id})" title="删除"><i class="bi bi-trash"></i></button>`;
-            return `<tr>
+            const defaultBadge = isDefault ? ' <span class="badge bg-warning text-dark">系统</span>' : (isArchive ? ' <span class="badge bg-secondary">归档</span>' : '');
+            const archiveActions = isArchive ? '<span class="small text-muted">—</span>' : '';
+            const normalActions = isArchive ? '' : `<button class="btn btn-sm btn-outline-primary" onclick="editBox(${b.id})" title="编辑"><i class="bi bi-pencil"></i></button>
+                    <button class="btn btn-sm btn-outline-success" onclick="cloneBox(${b.id})" title="复制"><i class="bi bi-copy"></i></button>
+                    ${isDefault ? '' : `<button class="btn btn-sm btn-outline-danger" onclick="deleteBox(${b.id})" title="删除"><i class="bi bi-trash"></i></button>`}
+                    <button class="btn btn-sm btn-outline-info" onclick="toggleBoxFull(${b.id},${b.is_full ? 0 : 1})" title="${b.is_full ? '取消满标记' : '标记已满'}"><i class="bi bi-${b.is_full ? 'unlock' : 'lock'}"></i></button>
+                    <button class="btn btn-sm btn-outline-warning" onclick="printBoxLabels(${b.id})" title="打印标签"><i class="bi bi-printer"></i></button>`;
+            const rowClass = isArchive ? 'table-secondary' : '';
+            return `<tr class="${rowClass}">
                 <td><strong><a href="javascript:void(0)" class="text-decoration-none" onclick="viewBoxProducts(${b.id})">${escHtml(b.label)}</a></strong>${defaultBadge}</td>
                 <td>${escHtml(b.box_type)}</td>
                 <td><small>${escHtml(b.ip_tags)}</small></td>
@@ -24252,13 +24260,7 @@ async function loadBoxes() {
                 <td>${fullIcon}</td>
                 <td>${b.priority}</td>
                 <td>${escHtml(b.location)}</td>
-                <td>
-                    <button class="btn btn-sm btn-outline-primary" onclick="editBox(${b.id})" title="编辑"><i class="bi bi-pencil"></i></button>
-                    <button class="btn btn-sm btn-outline-success" onclick="cloneBox(${b.id})" title="复制"><i class="bi bi-copy"></i></button>
-                    ${deleteBtn}
-                    <button class="btn btn-sm btn-outline-info" onclick="toggleBoxFull(${b.id},${b.is_full ? 0 : 1})" title="${b.is_full ? '取消满标记' : '标记已满'}"><i class="bi bi-${b.is_full ? 'unlock' : 'lock'}"></i></button>
-                    <button class="btn btn-sm btn-outline-warning" onclick="printBoxLabels(${b.id})" title="打印标签"><i class="bi bi-printer"></i></button>
-                </td>
+                <td>${archiveActions}${normalActions}</td>
             </tr>`;
         }).join('');
     } catch (e) {
@@ -24414,6 +24416,35 @@ async function deleteBox(id) {
 
 async function editBox(id) { showBoxForm(id); }
 
+// ---- 归档/恢复操作 ----
+
+async function archiveProduct(itemId, title) {
+    if (!confirm(`归档商品「${title}」？\n\n商品将被移入归档箱，后续可从归档箱恢复。`)) return;
+    try {
+        const resp = await fetch(`/api/inventory/products/${encodeURIComponent(itemId)}/archive`, {
+            method: 'POST', headers: authHeaders()
+        });
+        if (!resp.ok) { const err = await resp.json().catch(() => ({})); alert(err.detail || '归档失败'); return; }
+        showToast('已归档: ' + title);
+        if (invCurrentTab === 'products') loadInventoryProducts();
+        else if (invCurrentTab === 'boxes') loadBoxes();
+        else loadShippingList();
+    } catch (e) { alert('归档失败: ' + e.message); }
+}
+
+async function restoreProduct(itemId, title) {
+    if (!confirm(`恢复商品「${title}」到原箱？`)) return;
+    try {
+        const resp = await fetch(`/api/inventory/products/${encodeURIComponent(itemId)}/restore`, {
+            method: 'POST', headers: authHeaders()
+        });
+        if (!resp.ok) { const err = await resp.json().catch(() => ({})); alert(err.detail || '恢复失败'); return; }
+        showToast('已恢复: ' + title);
+        if (invCurrentTab === 'products') loadInventoryProducts();
+        else if (invCurrentTab === 'boxes') loadBoxes();
+    } catch (e) { alert('恢复失败: ' + e.message); }
+}
+
 // ---- 箱内商品查看 ----
 
 let _viewBoxId = 0;
@@ -24460,17 +24491,25 @@ async function viewBoxProducts(boxId) {
         document.getElementById('boxProductsTbody').innerHTML = products.map((p, i) => {
             const img = (p.images && p.images.length) ? ` onerror="this.style.display='none'"` : '';
             const imgSrc = (p.images && p.images.length) ? p.images[0] : '';
-            return `<tr>
+            const isDelisted = p.is_delisted;
+            const isArchived = p.is_archived;
+            const rowClass = isArchived ? 'table-secondary' : (isDelisted ? 'table-warning' : '');
+            // Action buttons
+            let actionHtml = `<button class="btn btn-outline-warning btn-sm py-0" onclick="printProductLabel('${escHtml(p.item_id)}','${escHtml(p.item_title||'')}','${escHtml(box?.label||'')}')" title="打印标签"><i class="bi bi-printer"></i></button>`;
+            if (isArchived) {
+                actionHtml += `<button class="btn btn-outline-success btn-sm py-0 ms-1" onclick="restoreProduct('${escHtml(p.item_id)}','${escHtml(p.item_title||'')}')" title="恢复到原箱"><i class="bi bi-arrow-counterclockwise"></i> 恢复</button>`;
+            } else if (isDelisted) {
+                actionHtml += `<button class="btn btn-outline-secondary btn-sm py-0 ms-1" onclick="archiveProduct('${escHtml(p.item_id)}','${escHtml(p.item_title||'')}')" title="归档"><i class="bi bi-archive"></i> 归档</button>`;
+            } else {
+                actionHtml += `<button class="btn btn-outline-danger btn-sm py-0 ms-1" onclick="removeFromBox(${boxId},'${escHtml(p.item_id)}')">移出</button>`;
+                actionHtml += `<select class="form-select form-select-sm d-inline-block ms-1" style="width:auto" onchange="moveToBox(${boxId},'${escHtml(p.item_id)}',this.value);this.value=''">
+                    <option value="">移动到...</option>${otherOpts}</select>`;
+            }
+            return `<tr class="${rowClass}">
                 <td>${imgSrc ? `<img src="${escHtml(imgSrc)}" style="width:48px;height:48px;object-fit:contain;background:#f8f9fa;cursor:pointer" onclick="previewImage('${escHtml(imgSrc)}')">` : ''}</td>
-                <td><small class="text-truncate d-inline-block" style="max-width:260px">${escHtml(p.item_title||'')}</small></td>
+                <td><small class="text-truncate d-inline-block" style="max-width:260px">${escHtml(p.item_title||'')}${isArchived ? ' <span class="badge bg-secondary">已归档</span>' : (isDelisted ? ' <span class="badge bg-danger">已下架</span>' : '')}</small></td>
                 <td><small>${p.item_price||''}</small></td>
-                <td>
-                    <button class="btn btn-outline-warning btn-sm py-0" onclick="printProductLabel('${escHtml(p.item_id)}','${escHtml(p.item_title||'')}','${escHtml(box?.label||'')}')" title="打印标签"><i class="bi bi-printer"></i></button>
-                    <button class="btn btn-outline-danger btn-sm py-0" onclick="removeFromBox(${boxId},'${escHtml(p.item_id)}')">移出</button>
-                    <select class="form-select form-select-sm d-inline-block ms-1" style="width:auto" onchange="moveToBox(${boxId},'${escHtml(p.item_id)}',this.value);this.value=''">
-                        <option value="">移动到...</option>${otherOpts}
-                    </select>
-                </td>
+                <td>${actionHtml}</td>
             </tr>`;
         }).join('');
     } catch (e) {
@@ -24581,7 +24620,7 @@ async function loadShippingList() {
                     <td>${o.images && o.images.length ? `<img src="${escHtml(o.images[0])}_80x80.jpg" style="width:36px;height:36px;object-fit:cover;border-radius:4px;margin-right:6px;cursor:pointer" onclick="previewImage('${escHtml(o.images[0])}')">` : ''}${escHtml(o.item_title)}</td>
                     <td>${o.amount ? '¥'+o.amount : ''}</td>
                     <td>${escHtml(o.box_label)}</td>
-                    <td>${o.label_printed ? '<span class="badge bg-success">已打</span>' : `<span class="badge bg-warning">未打</span> ${o.box_id ? `<button class="btn btn-sm btn-outline-warning ms-1" onclick="printBoxLabels(${o.box_id})" title="补打"><i class="bi bi-printer"></i></button>` : ''}`}</td>
+                    <td>${o.label_printed ? '<span class="badge bg-success">已打</span>' : `<span class="badge bg-warning">未打</span> ${o.box_id ? `<button class="btn btn-sm btn-outline-warning ms-1" onclick="printBoxLabels(${o.box_id})" title="补打"><i class="bi bi-printer"></i></button>` : ''}`}${o.is_delisted ? `<button class="btn btn-sm btn-outline-secondary ms-1" onclick="archiveProduct('${escHtml(o.item_id)}','${escHtml(o.item_title)}')" title="归档"><i class="bi bi-archive"></i></button>` : ''}</td>
                 </tr>
             `).join('');
         }
@@ -24687,6 +24726,7 @@ async function doReboxAll() {
 // ---- 商品列表 (SKU 折叠) ----
 
 let inventorySearchText = '';
+let inventoryFilter = 'all';  // 'all' | 'delisted' | 'archived'
 
 async function syncInventoryFromXianyu() {
     const btn = document.getElementById('btnInventorySync');
@@ -24733,6 +24773,13 @@ async function clearInventorySearch() {
     await loadInventoryProducts();
 }
 
+async function filterInventoryProducts(filterValue) {
+    inventoryFilter = filterValue;
+    document.getElementById('inventoryFilterLabel').textContent = 
+        filterValue === 'all' ? '全部' : (filterValue === 'delisted' ? '已下架' : '已归档');
+    await loadInventoryProducts();
+}
+
 async function deleteInventoryProduct(itemId, title) {
     if (!confirm(`确定删除已下架商品「${title}」吗？\n\n将同时删除：\n• 商品详情和 SKU 数据\n• 箱子映射关系\n\n此操作不可恢复。`)) {
         return;
@@ -24764,7 +24811,9 @@ async function loadInventoryProducts() {
         }
         const resp = await fetch(url, { headers: authHeaders() });
         const data = await resp.json();
-        const products = data.products || [];
+        let products = data.products || [];
+        if (inventoryFilter === 'delisted') products = products.filter(p => p.is_delisted && !p.is_archived);
+        else if (inventoryFilter === 'archived') products = products.filter(p => p.is_archived);
         if (products.length === 0) {
             cardsDiv.innerHTML = '<div class="col-12 text-muted">' + (inventorySearchText ? '没有匹配的商品' : '暂无商品数据（需先从闲鱼同步商品信息）') + '</div>';
             return;
@@ -24772,6 +24821,7 @@ async function loadInventoryProducts() {
         cardsDiv.innerHTML = products.map(p => {
             const isMulti = p.sku_count > 1;
             const isDelisted = p.is_delisted;
+            const isArchived = p.is_archived;
             const skuRows = p.skus.map(s => `
                 <tr>
                     <td><small>${escHtml(s.props_text) || '默认'}</small></td>
@@ -24782,10 +24832,10 @@ async function loadInventoryProducts() {
             const firstImg = (p.images && p.images.length) ? p.images[0] : '';
             return `
             <div class="col-md-6 col-lg-4 mb-3">
-              <div class="card h-100 d-flex flex-column ${isDelisted ? 'opacity-50' : ''}">
+              <div class="card h-100 d-flex flex-column ${(isDelisted || isArchived) ? 'opacity-75' : ''}">
                 <div class="card-header py-1 d-flex justify-content-between align-items-start">
                   <span class="small fw-bold" style="max-width:70%;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.3">${escHtml(p.title)}</span>
-                  ${isDelisted ? '<span class="badge bg-danger">已下架</span>' : (isMulti ? '<span class="badge bg-info">'+p.sku_count+'规格</span>' : '<span class="badge bg-secondary">单规格</span>')}
+                  ${isArchived ? '<span class="badge bg-secondary">已归档</span>' : (isDelisted ? '<span class="badge bg-danger">已下架</span>' : (isMulti ? '<span class="badge bg-info">'+p.sku_count+'规格</span>' : '<span class="badge bg-secondary">单规格</span>'))}
                 </div>
                 <div class="card-body px-2 flex-grow-0" style="padding-top:2px;padding-bottom:2px">
                   ${isMulti ? `
@@ -24803,7 +24853,7 @@ async function loadInventoryProducts() {
                 <div class="card-footer px-2 small flex-grow-0" style="padding-top:2px;padding-bottom:2px;border-top:none">
                   ${p.box_label ? `<span class="text-primary" style="cursor:pointer" onclick="editBox(${p.box_id})" title="点击查看箱子">📦 ${escHtml(p.box_label)}</span>` : '<span class="text-warning">⚠ 未分配</span>'}
                   <button class="btn btn-outline-warning btn-sm py-0 ms-1" onclick="event.stopPropagation();printProductLabel('${escHtml(p.item_id)}','${escHtml(p.title).replace(/'/g,"\\'")}','${escHtml(p.box_label||'')}')" title="打印标签"><i class="bi bi-printer"></i></button>
-                  ${isDelisted ? `<button class="btn btn-outline-danger btn-sm py-0 ms-1" onclick="event.stopPropagation();deleteInventoryProduct('${escHtml(p.item_id)}','${escHtml(p.title).replace(/'/g,"\\'")}')" title="删除已下架商品"><i class="bi bi-trash"></i></button>` : ''}
+                  ${isArchived ? `<button class="btn btn-outline-success btn-sm py-0 ms-1" onclick="event.stopPropagation();restoreProduct('${escHtml(p.item_id)}','${escHtml(p.title).replace(/'/g,"\\'")}')" title="恢复到原箱"><i class="bi bi-arrow-counterclockwise"></i></button><button class="btn btn-outline-danger btn-sm py-0 ms-1" onclick="event.stopPropagation();deleteInventoryProduct('${escHtml(p.item_id)}','${escHtml(p.title).replace(/'/g,"\\'")}')" title="删除"><i class="bi bi-trash"></i></button>` : (isDelisted ? `<button class="btn btn-outline-secondary btn-sm py-0 ms-1" onclick="event.stopPropagation();archiveProduct('${escHtml(p.item_id)}','${escHtml(p.title).replace(/'/g,"\\'")}')" title="归档"><i class="bi bi-archive"></i></button><button class="btn btn-outline-danger btn-sm py-0 ms-1" onclick="event.stopPropagation();deleteInventoryProduct('${escHtml(p.item_id)}','${escHtml(p.title).replace(/'/g,"\\'")}')" title="删除已下架商品"><i class="bi bi-trash"></i></button>` : '')}
                 </div>
                 ${firstImg ? `<img src="${escHtml(firstImg)}" class="card-img-bottom mt-auto" style="width:100%;aspect-ratio:1/1;object-fit:contain;background-color:#f8f9fa" alt="${escHtml(p.title)}" onerror="this.style.display='none'">` : '<div class="mt-auto" style="width:100%;aspect-ratio:1/1;background-color:#f8f9fa"></div>'}
               </div>
