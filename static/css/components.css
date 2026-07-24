@@ -21,6 +21,10 @@
   margin-bottom: 2rem;
 }
 
+#inv-tab-products .card:has(#inventoryFilterBtn[aria-expanded="true"]) {
+  z-index: 1100;
+}
+
 .card:hover {
   transform: translateY(-4px);
   box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);

@@ -24801,12 +24801,11 @@ async function filterInventoryProducts(filterValue) {
     await loadInventoryProducts();
 }
 
-// 初始化筛选下拉框（strategy='fixed' 防止被卡片遮挡）
+// 初始化筛选下拉框
 function initInventoryFilterDropdown() {
     const btn = document.getElementById('inventoryFilterBtn');
     if (!btn) return;
-    // 获取或创建实例，确保 strategy=fixed
-    const instance = bootstrap.Dropdown.getOrCreateInstance(btn, { strategy: 'fixed' });
+    bootstrap.Dropdown.getOrCreateInstance(btn);
 }
 
 async function deleteInventoryProduct(itemId, title) {
