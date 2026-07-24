@@ -11375,6 +11375,23 @@ Cookie数量: {cookie_count}
         # 迁移：添加 is_archive/archived/original_box_id 列并创建归档箱
         self._migrate_archive_box(cursor)
 
+        # 自动分箱日志表
+        self._execute_sql(cursor, '''
+        CREATE TABLE IF NOT EXISTS auto_box_logs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id    TEXT NOT NULL,
+            item_id     TEXT NOT NULL,
+            item_title  TEXT,
+            item_price  TEXT,
+            box_label   TEXT,
+            images      TEXT,
+            operation   TEXT DEFAULT 'auto_box',
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_auto_box_logs_batch ON auto_box_logs(batch_id)")
+        self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_auto_box_logs_item ON auto_box_logs(item_id)")
+
     def _migrate_default_box(self, cursor):
         """添加 is_default 列，迁移/创建兜底箱子。"""
         # 1. 添加列
@@ -12190,6 +12207,42 @@ Cookie数量: {cookie_count}
                 logger.error(f"恢复商品失败: {e}")
                 self.conn.rollback()
                 return {'success': False, 'message': str(e)}
+
+    def add_auto_box_log(self, batch_id: str, item_id: str, item_title: str,
+                         item_price: str, box_label: str, images: str,
+                         operation: str = 'auto_box') -> bool:
+        """记录单条自动分箱日志。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "INSERT INTO auto_box_logs (batch_id, item_id, item_title, item_price, box_label, images, operation) VALUES (?,?,?,?,?,?,?)",
+                    (batch_id, item_id, item_title, item_price, box_label, images, operation)
+                )
+                self.conn.commit()
+                return True
+            except Exception as e:
+                logger.error(f"记录自动分箱日志失败: {e}")
+                self.conn.rollback()
+                return False
+
+    def get_auto_box_logs(self, limit: int = 200) -> list[dict]:
+        """获取自动分箱日志（按时间倒序）。"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                SELECT id, batch_id, item_id, item_title, item_price, box_label, images, operation, created_at
+                FROM auto_box_logs ORDER BY id DESC LIMIT ?
+            ''', (limit,))
+            return [
+                {
+                    'id': r[0], 'batch_id': r[1], 'item_id': r[2],
+                    'item_title': r[3] or '', 'item_price': r[4] or '',
+                    'box_label': r[5] or '', 'images': self._json_loads_safe(r[6], []),
+                    'operation': r[7] or 'auto_box', 'created_at': r[8],
+                }
+                for r in cursor.fetchall()
+            ]
 
     def get_active_cookie_ids(self) -> list:
         """获取所有有效账号的 cookie_id。"""

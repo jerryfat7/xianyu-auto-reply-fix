@@ -9,6 +9,7 @@
 - 无任何匹配 → 标记 unmatched
 """
 
+import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -55,11 +56,12 @@ def _match_item(item_title: str, ip_tags: str, cat_tags: str) -> bool:
     return ip_ok and cat_ok
 
 
-def auto_box(db_manager, only_new: bool = True) -> BoxingResult:
+def auto_box(db_manager, only_new: bool = True, operation: str = 'auto_box') -> BoxingResult:
     """
     执行自动分箱。
     """
     result = BoxingResult()
+    batch_id = str(uuid.uuid4())[:8]
 
     if only_new:
         items = db_manager.get_unboxed_items()
@@ -135,6 +137,23 @@ def auto_box(db_manager, only_new: bool = True) -> BoxingResult:
                         dbm2.conn.commit()
                         result.assigned += 1
                         assigned = True
+                        # 记录分箱日志
+                        try:
+                            import json
+                            images_json = ''
+                            cur.execute("SELECT images FROM item_parents WHERE item_id = ?", (item_id,))
+                            img_row = cur.fetchone()
+                            if img_row and img_row[0]:
+                                images_json = img_row[0]
+                            cur.execute("SELECT item_price FROM item_info WHERE item_id = ?", (item_id,))
+                            price_row = cur.fetchone()
+                            item_price = price_row[0] if price_row else ''
+                            db_manager.add_auto_box_log(
+                                batch_id, item_id, title, item_price or '',
+                                box['label'] or '', images_json, operation
+                            )
+                        except Exception as log_e:
+                            logger.warning(f"[自动分箱] 记录日志失败: {log_e}")
                         break
             except Exception as e:
                 logger.warning(f"[自动分箱] 分配异常: {title} → {box['label']}: {e}")
@@ -169,4 +188,4 @@ def rebox_all(db_manager, confirm_text: str) -> Optional[BoxingResult]:
     count = db_manager.clear_all_mappings()
     logger.info(f"[重新分箱] 已清空 {count} 条映射")
 
-    return auto_box(db_manager, only_new=False)
+    return auto_box(db_manager, only_new=False, operation='rebox')

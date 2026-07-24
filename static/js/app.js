@@ -24223,7 +24223,7 @@ function showInventoryTab(tab) {
     document.getElementById('inv-tab-shipping').style.display = tab === 'shipping' ? '' : 'none';
     if (tab === 'boxes') loadBoxes();
     if (tab === 'products') loadInventoryProducts();
-    if (tab === 'autobox') { document.getElementById('autobox-result').style.display = 'none'; }
+    if (tab === 'autobox') { document.getElementById('autobox-result').style.display = ''; loadAutoBoxLogs(); }
     if (tab === 'shipping') loadShippingList();
 }
 
@@ -24684,6 +24684,7 @@ async function runAutoBox() {
         const resp = await fetch('/api/inventory/auto-box', { method: 'POST', headers: authHeaders() });
         const data = await resp.json();
         showAutoBoxResult(data);
+        loadAutoBoxLogs();
     } catch (e) { alert('自动分箱失败: ' + e.message); }
 }
 
@@ -24691,16 +24692,35 @@ function showAutoBoxResult(data) {
     document.getElementById('autobox-result').style.display = '';
     document.getElementById('autobox-summary').innerHTML =
         `总计: <strong>${data.total}</strong> 件 &nbsp;|&nbsp; 已分配: <strong class="text-success">${data.assigned}</strong> &nbsp;|&nbsp; 溢出: <strong class="text-warning">${data.overflow}</strong> &nbsp;|&nbsp; 未匹配: <strong class="text-danger">${data.unmatched}</strong>`;
+}
 
-    let html = '';
-    (data.overflow_detail || []).forEach(d => {
-        html += `<tr><td>${escHtml(d.item_title)}</td><td><span class="badge bg-warning">溢出</span></td><td>已满箱: ${escHtml(d.matched_boxes.join(', '))}</td><td>--</td></tr>`;
-    });
-    (data.unmatched_items || []).forEach(d => {
-        html += `<tr><td>${escHtml(d.item_title)}</td><td><span class="badge bg-danger">未匹配</span></td><td>无适用规则</td><td>--</td></tr>`;
-    });
-    if (!html) html = '<tr><td colspan="4" class="text-center text-success">全部商品已分配！</td></tr>';
-    document.getElementById('autoboxDetailBody').innerHTML = html;
+async function loadAutoBoxLogs() {
+    const tbody = document.getElementById('autoboxDetailBody');
+    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">加载中...</td></tr>';
+    try {
+        const resp = await fetch('/api/inventory/auto-box-logs?limit=300', { headers: authHeaders() });
+        const data = await resp.json();
+        const logs = data.logs || [];
+        if (logs.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">暂无分箱记录</td></tr>';
+            return;
+        }
+        tbody.innerHTML = logs.map(l => {
+            const imgSrc = (l.images && l.images.length) ? l.images[0] : '';
+            const opLabel = l.operation === 'rebox' ? '重新分箱' : '自动分箱';
+            const opBadge = l.operation === 'rebox' ? 'bg-warning text-dark' : 'bg-info';
+            return `<tr>
+                <td>${imgSrc ? `<img src="${escHtml(imgSrc)}_80x80.jpg" style="width:40px;height:40px;object-fit:cover;border-radius:4px;cursor:pointer" onclick="previewImage('${escHtml(imgSrc)}')">` : ''}</td>
+                <td><small>${escHtml(l.item_id)}</small></td>
+                <td><small>${escHtml(l.item_title)}</small></td>
+                <td><small>${escHtml(l.item_price)}</small></td>
+                <td><small><span class="badge ${opBadge}">${opLabel}</span> 📦 ${escHtml(l.box_label)}</small></td>
+                <td><small class="text-muted">${(l.created_at||'').substring(0,16)}</small></td>
+            </tr>`;
+        }).join('');
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="5" class="text-center text-danger">加载失败: ${escHtml(e.message)}</td></tr>`;
+    }
 }
 
 function showReboxConfirm() {
@@ -24720,6 +24740,7 @@ async function doReboxAll() {
         const data = await resp.json();
         bootstrap.Modal.getInstance(document.getElementById('reboxConfirmModal')).hide();
         showAutoBoxResult(data);
+        loadAutoBoxLogs();
     } catch (e) { alert('重新分箱失败: ' + e.message); }
 }
 

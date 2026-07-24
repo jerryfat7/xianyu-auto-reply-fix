@@ -16283,6 +16283,13 @@ async def inventory_unmatched(user_info: Dict[str, Any] = Depends(require_auth))
     return {"unboxed": unboxed, "count": len(unboxed)}
 
 
+@app.get('/api/inventory/auto-box-logs')
+async def inventory_auto_box_logs(limit: int = 200, user_info: Dict[str, Any] = Depends(require_auth)):
+    """获取自动分箱日志（含商品图片、所属箱子等详情）。"""
+    logs = db_manager.get_auto_box_logs(limit=limit)
+    return {"logs": logs}
+
+
 # ---- 打印标签 ----
 
 @app.get('/api/inventory/parent-products')
