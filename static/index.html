@@ -4126,7 +4126,7 @@
           </table></div></div>
         </div>
         <div id="inv-tab-products" style="display:none">
-          <div class="card mb-3"><div class="card-body py-2">
+          <div class="card mb-3"><div class="card-body py-2" style="overflow:visible">
             <div class="d-flex align-items-center gap-2 flex-wrap">
               <button class="btn btn-sm btn-outline-primary" onclick="syncInventoryFromXianyu()" id="btnInventorySync">
                 <i class="bi bi-cloud-download"></i> 从闲鱼同步
@@ -4143,7 +4143,7 @@
                   <i class="bi bi-x-lg"></i>
                 </button>
               </div>
-              <div class="dropdown">
+              <div class="dropdown" data-bs-display="static">
                 <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-boundary="viewport" id="inventoryFilterLabel">全部</button>
                 <ul class="dropdown-menu">
                   <li><a class="dropdown-item" href="javascript:void(0)" onclick="filterInventoryProducts('all')">全部</a></li>
