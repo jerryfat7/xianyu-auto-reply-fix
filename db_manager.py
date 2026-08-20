@@ -12062,30 +12062,45 @@ Cookie数量: {cookie_count}
     # ---- SKU 查询 ----
 
     def get_parent_products(self, cookie_id: str = '', search_text: str = '') -> list[dict]:
-        """获取父商品列表（含 SKU 子列表）。"""
+        """获取父商品列表（含 SKU 子列表）。
+
+        排序规则：已归档商品置底（archived 升序），其余按更新时间 updated_at 降序（最新在上）。
+        """
+        sort_clause = """
+            ORDER BY
+                COALESCE((SELECT MAX(pb.archived) FROM inventory_product_box pb WHERE pb.item_id = ip.item_id), 0) ASC,
+                ip.updated_at DESC
+        """
         with self.lock:
             cursor = self.conn.cursor()
             if cookie_id:
                 if search_text:
-                    cursor.execute("""
-                        SELECT id, item_id, title, images, props, cookie_id, status, created_at
-                        FROM item_parents WHERE cookie_id = ? AND (title LIKE ? OR item_id LIKE ?) ORDER BY title
+                    cursor.execute(f"""
+                        SELECT ip.id, ip.item_id, ip.title, ip.images, ip.props, ip.cookie_id, ip.status, ip.created_at
+                        FROM item_parents ip
+                        WHERE ip.cookie_id = ? AND (ip.title LIKE ? OR ip.item_id LIKE ?)
+                        {sort_clause}
                     """, (cookie_id, f'%{search_text}%', f'%{search_text}%'))
                 else:
-                    cursor.execute("""
-                        SELECT id, item_id, title, images, props, cookie_id, status, created_at
-                        FROM item_parents WHERE cookie_id = ? ORDER BY title
+                    cursor.execute(f"""
+                        SELECT ip.id, ip.item_id, ip.title, ip.images, ip.props, ip.cookie_id, ip.status, ip.created_at
+                        FROM item_parents ip
+                        WHERE ip.cookie_id = ?
+                        {sort_clause}
                     """, (cookie_id,))
             else:
                 if search_text:
-                    cursor.execute("""
-                        SELECT id, item_id, title, images, props, cookie_id, status, created_at
-                        FROM item_parents WHERE title LIKE ? OR item_id LIKE ? ORDER BY title
+                    cursor.execute(f"""
+                        SELECT ip.id, ip.item_id, ip.title, ip.images, ip.props, ip.cookie_id, ip.status, ip.created_at
+                        FROM item_parents ip
+                        WHERE ip.title LIKE ? OR ip.item_id LIKE ?
+                        {sort_clause}
                     """, (f'%{search_text}%', f'%{search_text}%'))
                 else:
-                    cursor.execute("""
-                        SELECT id, item_id, title, images, props, cookie_id, status, created_at
-                        FROM item_parents ORDER BY title
+                    cursor.execute(f"""
+                        SELECT ip.id, ip.item_id, ip.title, ip.images, ip.props, ip.cookie_id, ip.status, ip.created_at
+                        FROM item_parents ip
+                        {sort_clause}
                     """)
             parents = []
             for r in cursor.fetchall():
@@ -12187,6 +12202,25 @@ Cookie数量: {cookie_count}
                 return delisted_count
             except Exception as e:
                 logger.error(f"标记下架商品失败: {e}")
+                self.conn.rollback()
+                return 0
+
+    def touch_parents_updated_at(self, cookie_id: str, item_ids: list) -> int:
+        """刷新一批在售商品的 updated_at 为当前时间（用于商品列表"最新在上"排序）。"""
+        if not item_ids:
+            return 0
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                placeholders = ','.join(['?'] * len(item_ids))
+                cursor.execute(f"""
+                    UPDATE item_parents SET updated_at = CURRENT_TIMESTAMP
+                    WHERE cookie_id = ? AND item_id IN ({placeholders}) AND status = 'active'
+                """, [cookie_id] + list(item_ids))
+                self.conn.commit()
+                return cursor.rowcount
+            except Exception as e:
+                logger.error(f"刷新商品更新时间失败: {e}")
                 self.conn.rollback()
                 return 0
 

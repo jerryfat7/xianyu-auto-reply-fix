@@ -124,6 +124,15 @@
   - 打印成功后 `printProductLabel` 已有的弹窗刷新逻辑使徽章实时更新（无需额外改动）
 - **验证**：临时服务 + 浏览器实机验证表头/徽章/打印回写后徽章实时更新
 
+### 3.14 商品列表排序：更新时间倒序 + 已归档置底（2026-08-20）
+- **需求**：商品列表原按标题 `ORDER BY title`（Unicode 码点序，非拼音），改为按商品更新时间倒序（最新在上），已归档商品置底
+- **改动**：
+  - `db_manager.get_parent_products`：4 个分支 SQL 排序改为 `COALESCE(归档子查询,0) ASC, updated_at DESC`（用 `inventory_product_box` 聚合子查询判断是否归档，多箱任一归档即置底）
+  - 新增 `db_manager.touch_parents_updated_at(cookie_id, item_ids)`：刷新一批在售商品 `updated_at`
+  - `reply_server.inventory_sync_from_xianyu`：同步后刷新本次同步商品的 `updated_at`，使"最新同步"排最前（否则已存在商品同步后位置不变）
+- **说明**：`updated_at` 语义 = 首次入库 / 状态切换 / 最近一次同步
+- **自测**：`tests/test_parent_products_ordering.py`（3 用例：时间倒序+归档置底 / touch 置顶 / 搜索时排序仍生效）
+
 ---
 
 ## 四、功能设计决策

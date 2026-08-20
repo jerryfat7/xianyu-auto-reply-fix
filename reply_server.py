@@ -16337,6 +16337,8 @@ async def inventory_sync_from_xianyu(user_info: Dict[str, Any] = Depends(require
             )
             delisted = db_manager.mark_delisted_items(cid, item_ids)
             total_delisted += delisted
+            # 刷新本次同步的在售商品更新时间，保证"最新同步的商品"排在商品列表最前
+            db_manager.touch_parents_updated_at(cid, item_ids)
             account_results.append({
                 "cookie_id": cid,
                 "synced": result.get('total_count', 0),
