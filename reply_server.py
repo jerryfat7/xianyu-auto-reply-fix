@@ -16178,17 +16178,20 @@ async def inventory_get_box_products(box_id: int, user_info: Dict[str, Any] = De
 
 @app.put('/api/inventory/products/{item_id}/box')
 async def inventory_assign_product(item_id: str, request: Request, user_info: Dict[str, Any] = Depends(require_auth)):
-    """手动修改商品所属箱子。"""
+    """手动修改商品所属箱子（保留 label_printed 标记）。"""
     body = await request.json()
     new_box_id = body.get('box_id')
     if not new_box_id:
         raise HTTPException(400, "缺少 box_id")
-    # 先从旧箱子移除，再分配到新箱子
     old_box = db_manager.get_item_box(item_id)
     if old_box:
-        db_manager.remove_item_from_box(item_id, old_box['box_id'])
-    ok = db_manager.assign_item_to_box(item_id, new_box_id)
+        if old_box['box_id'] == new_box_id:
+            return {"message": "商品分配成功"}
+        ok = db_manager.move_item_between_boxes(item_id, old_box['box_id'], new_box_id)
+    else:
+        ok = db_manager.assign_item_to_box(item_id, new_box_id)
     if ok:
+        db_manager.refresh_box_full_status(new_box_id)
         return {"message": "商品分配成功"}
     raise HTTPException(500, "分配失败")
 
@@ -16206,7 +16209,7 @@ async def inventory_remove_product(box_id: int, item_id: str, user_info: Dict[st
 
 @app.post('/api/inventory/boxes/{box_id}/products/{item_id}/move')
 async def inventory_move_product(box_id: int, item_id: str, request: Request, user_info: Dict[str, Any] = Depends(require_auth)):
-    """将商品移动到其他箱子。"""
+    """将商品移动到其他箱子（保留 label_printed 标记，幂等）。"""
     body = await request.json()
     to_box_id = body.get('to_box_id')
     if not to_box_id:
@@ -16216,18 +16219,10 @@ async def inventory_move_product(box_id: int, item_id: str, request: Request, us
     target = db_manager.get_box(to_box_id)
     if not target:
         raise HTTPException(404, "目标箱子不存在")
-    from db_manager import db_manager as dbm
-    with dbm.lock:
-        cur = dbm.conn.cursor()
-        cur.execute("DELETE FROM inventory_product_box WHERE item_id=? AND box_id=?", (item_id, box_id))
-        cur.execute("INSERT OR IGNORE INTO inventory_product_box (item_id, box_id) VALUES (?,?)", (item_id, to_box_id))
-        if cur.rowcount > 0:
-            cur.execute("SELECT COUNT(*) FROM inventory_product_box WHERE box_id=?", (to_box_id,))
-            cnt = cur.fetchone()[0]
-            cap = target.get('capacity')
-            if cap and cnt >= cap:
-                cur.execute("UPDATE inventory_boxes SET is_full=1 WHERE id=?", (to_box_id,))
-        dbm.conn.commit()
+    ok = db_manager.move_item_between_boxes(item_id, box_id, to_box_id)
+    if not ok:
+        raise HTTPException(404, "商品不在该箱子中")
+    db_manager.refresh_box_full_status(to_box_id)
     return {"message": "已移动", "from_box": box_id, "to_box": to_box_id}
 
 
@@ -16418,7 +16413,11 @@ async def inventory_restore_product(item_id: str, user_info: Dict[str, Any] = De
 
 @app.post('/api/inventory/print-labels/{box_id}')
 async def inventory_print_labels(box_id: int, user_info: Dict[str, Any] = Depends(require_auth)):
-    """打印指定箱子的标签（仅箱子标签，不含箱内商品）。"""
+    """打印指定箱子的标签（仅箱子标签，不含箱内商品）。
+
+    注意：箱标签 ≠ 商品标签，本接口不回写商品的 label_printed 标记；
+    商品维度的标记由单品打印接口 /api/inventory/products/{item_id}/print-label 负责。
+    """
     from label_print_client import get_client
     box = db_manager.get_box(box_id)
     if not box:
@@ -16444,7 +16443,7 @@ async def inventory_print_labels(box_id: int, user_info: Dict[str, Any] = Depend
 
 @app.post('/api/inventory/products/{item_id}/print-label')
 async def inventory_print_single_product(item_id: str, request: Request, user_info: Dict[str, Any] = Depends(require_auth)):
-    """打印单个商品标签（含商品名、箱名、商品ID）。"""
+    """打印单个商品标签（含商品名、箱名、商品ID）。打印成功后回写 label_printed=1。"""
     from label_print_client import get_client
     body = await request.json()
     box_label = body.get('box_label', '')
@@ -16457,10 +16456,67 @@ async def inventory_print_single_product(item_id: str, request: Request, user_in
             item_id=item_id,
             box_label=box_label,
         )
-        client.wait_print_done(task_id)
-        return {"status": "done", "item_id": item_id}
+        print_ok = client.wait_print_done(task_id)
     except Exception as e:
         raise HTTPException(500, f"打印失败: {e}")
+    if not print_ok:
+        # wait_print_done 返回 False：打印失败/取消/超时（含打印服务离线）
+        raise HTTPException(500, "打印任务未完成（失败/取消/超时），未标记已打印")
+
+    # 打印成功后回写已打印标记（失败不影响打印结果）
+    marked = False
+    try:
+        box_id = db_manager.get_item_box_id(item_id)
+        if box_id is not None:
+            marked = db_manager.mark_label_printed(item_id, box_id)
+            if not marked:
+                logger.warning(f"[库存] 回写 label_printed 未命中: item_id={item_id}, box_id={box_id}")
+        else:
+            logger.warning(f"[库存] 商品未分配箱子，跳过 label_printed 回写: item_id={item_id}")
+    except Exception as e:
+        logger.warning(f"[库存] 回写 label_printed 失败: item_id={item_id}, error={e}")
+
+    return {"status": "done", "item_id": item_id, "marked": marked}
+
+
+@app.post('/api/inventory/products/mark-printed')
+async def inventory_mark_products_printed(request: Request, user_info: Dict[str, Any] = Depends(require_auth)):
+    """批量补标记商品标签为已打印（用于历史打印记录人工补录）。
+
+    支持两种模式（可同时使用）：
+    1. {"item_ids": ["id1", ...]}：自动反查商品当前所在箱并标记
+    2. {"pairs": [{"item_id": "id1", "box_id": 1}, ...]}：显式指定 item_id + box_id
+
+    返回 {"marked": N, "total": M, "skipped": [...]}。
+    """
+    body = await request.json()
+    item_ids = body.get('item_ids') or []
+    pairs = body.get('pairs') or []
+    if not item_ids and not pairs:
+        raise HTTPException(400, "请提供 item_ids 或 pairs")
+
+    targets = []
+    skipped = []
+    for p in pairs:
+        item_id = str((p or {}).get('item_id') or '').strip()
+        box_id = (p or {}).get('box_id')
+        if not item_id or box_id is None:
+            skipped.append({'item_id': item_id or None, 'reason': '参数缺失'})
+            continue
+        targets.append((item_id, int(box_id)))
+    for item_id in item_ids:
+        item_id = str(item_id).strip()
+        if not item_id:
+            continue
+        box_id = db_manager.get_item_box_id(item_id)
+        if box_id is None:
+            skipped.append({'item_id': item_id, 'reason': '商品未分配箱子'})
+            continue
+        targets.append((item_id, box_id))
+
+    marked = db_manager.mark_labels_printed_batch(targets)
+    logger.info(f"[库存] 批量补标记已打印: 成功 {marked}/{len(targets)}, 跳过 {len(skipped)}")
+    return {"marked": marked, "total": len(targets), "skipped": skipped}
 
 
 # 移除自动启动，由Start.py或手动启动

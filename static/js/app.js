@@ -24547,6 +24547,12 @@ async function printProductLabel(itemId, itemName, boxLabel) {
         });
         if (!resp.ok) { const err = await resp.json().catch(()=>({})); showPrintToast(err.detail||'打印失败', true); return; }
         showPrintToast('打印完成: ' + itemName, false);
+        // 打印成功后刷新相关视图的已打/未打徽章
+        setTimeout(() => {
+            if (_boxProductsModal && _viewBoxId) viewBoxProducts(_viewBoxId);
+            if (invCurrentTab === 'shipping') loadShippingList();
+            else if (invCurrentTab === 'products') loadInventoryProducts();
+        }, 800);
     } catch (e) { showPrintToast('打印失败: '+e.message, true); }
 }
 

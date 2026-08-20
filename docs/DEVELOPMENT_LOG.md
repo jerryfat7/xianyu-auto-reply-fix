@@ -88,6 +88,22 @@
 - **原因**：HTML 缺少 `id="inventoryTabs"`，JS 选择器匹配为空
 - **修复**：给 `<ul>` 添加 `id="inventoryTabs"`
 
+### 3.11 label_printed 不回写（死代码修复，2026-08-20）
+- **现象**：前端点击「打印标签」后打印机出纸、接口返回成功，但 `inventory_product_box.label_printed` 永远为 0，发货清单/箱内商品视图始终显示「未打」
+- **原因**：
+  1. `POST /api/inventory/products/{item_id}/print-label` 只发送打印任务，从未调用 `db_manager.mark_label_printed()`（该方法此前为死代码）
+  2. 移箱（move）与手动分配（PUT box）实现为 `DELETE + INSERT OR IGNORE`，会把已置位的标记重置为 0
+  3. 原代码忽略 `wait_print_done()` 返回值，打印失败/离线时仍返回成功
+- **修复**：
+  - 单品打印成功后反查商品所在箱并回写 `label_printed=1`（try/except 包裹，失败仅记 warning 不影响打印响应，响应附加 `marked` 字段）
+  - 检查 `wait_print_done()` 返回值，打印失败/取消/超时（含服务离线）返回 500 且不标记
+  - `db_manager` 新增 `get_item_box_id` / `mark_labels_printed_batch` / `move_item_between_boxes`（保留标记、幂等）/ `refresh_box_full_status`
+  - 移箱接口与手动分配接口改用 `move_item_between_boxes`，保留标记
+  - 新增批量补标记接口 `POST /api/inventory/products/mark-printed`（支持 `item_ids` 自动反查箱 / `pairs` 显式指定两种模式，用于历史数据人工补录）
+  - 箱级打印接口 `/api/inventory/print-labels/{box_id}` 维持现状（箱标签 ≠ 商品标签），docstring 写明语义
+  - 前端 `printProductLabel` 打印成功后刷新箱内商品/发货清单/商品列表视图的徽章
+- **自测**：`tests/test_label_printed_writeback.py`（9 用例，mock `label_print_client.get_client`，临时数据库隔离，全部通过）
+
 ---
 
 ## 四、功能设计决策

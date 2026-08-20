@@ -11733,6 +11733,85 @@ Cookie数量: {cookie_count}
                 self.conn.rollback()
                 return False
 
+    def get_item_box_id(self, item_id: str) -> Optional[int]:
+        """查询商品当前所在的箱子ID（未分配返回 None）。"""
+        with self.lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT box_id FROM inventory_product_box WHERE item_id = ? LIMIT 1",
+                (item_id,),
+            )
+            row = cursor.fetchone()
+            return row[0] if row else None
+
+    def mark_labels_printed_batch(self, pairs: list[tuple[str, int]]) -> int:
+        """批量标记标签已打印。pairs: [(item_id, box_id), ...]，返回成功更新行数。"""
+        if not pairs:
+            return 0
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                total = 0
+                for item_id, box_id in pairs:
+                    cursor.execute(
+                        "UPDATE inventory_product_box SET label_printed = 1 WHERE item_id = ? AND box_id = ?",
+                        (item_id, box_id),
+                    )
+                    total += cursor.rowcount
+                self.conn.commit()
+                return total
+            except Exception as e:
+                logger.error(f"批量标记标签已打印失败: {e}")
+                self.conn.rollback()
+                return 0
+
+    def move_item_between_boxes(self, item_id: str, from_box_id: int, to_box_id: int) -> bool:
+        """将商品从一个箱子移动到另一个箱子，保留 label_printed 标记。
+
+        幂等：若商品不在源箱但已在目标箱，视为成功（重复调用不报错）。
+        """
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "SELECT label_printed FROM inventory_product_box WHERE item_id = ? AND box_id = ?",
+                    (item_id, from_box_id),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    # 幂等处理：商品已在目标箱则视为成功
+                    cursor.execute(
+                        "SELECT 1 FROM inventory_product_box WHERE item_id = ? AND box_id = ?",
+                        (item_id, to_box_id),
+                    )
+                    return cursor.fetchone() is not None
+                label_printed = row[0] or 0
+                cursor.execute(
+                    "DELETE FROM inventory_product_box WHERE item_id = ? AND box_id = ?",
+                    (item_id, from_box_id),
+                )
+                cursor.execute(
+                    "INSERT OR IGNORE INTO inventory_product_box (item_id, box_id, label_printed) VALUES (?, ?, ?)",
+                    (item_id, to_box_id, label_printed),
+                )
+                self.conn.commit()
+                return True
+            except Exception as e:
+                logger.error(f"移箱失败: {e}")
+                self.conn.rollback()
+                return False
+
+    def refresh_box_full_status(self, box_id: int):
+        """重新检查箱子容量，超限自动置 is_full=1。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                self._check_and_set_box_full(cursor, box_id)
+                self.conn.commit()
+            except Exception as e:
+                logger.error(f"刷新箱子满状态失败: {e}")
+                self.conn.rollback()
+
     def get_shipping_list(self) -> dict:
         """获取发货清单：订单视图 + 箱子核对视图（含箱内具体商品和图片）。"""
         with self.lock:
