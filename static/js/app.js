@@ -24462,7 +24462,7 @@ let _boxProductsModal = null;
 async function viewBoxProducts(boxId) {
     _viewBoxId = boxId;
     const modalEl = document.getElementById('boxProductsModal');
-    document.getElementById('boxProductsTbody').innerHTML = '<tr><td colspan="4" class="text-center text-muted">加载中...</td></tr>';
+    document.getElementById('boxProductsTbody').innerHTML = '<tr><td colspan="5" class="text-center text-muted">加载中...</td></tr>';
     // 只在首次打开时创建 modal，后续只刷新内容
     if (!_boxProductsModal) {
         _boxProductsModal = new bootstrap.Modal(modalEl);
@@ -24489,7 +24489,7 @@ async function viewBoxProducts(boxId) {
         document.getElementById('boxProductsCount').textContent = `共 ${products.length} 件`;
 
         if (products.length === 0) {
-            document.getElementById('boxProductsTbody').innerHTML = '<tr><td colspan="4" class="text-center text-muted">箱内暂无商品</td></tr>';
+            document.getElementById('boxProductsTbody').innerHTML = '<tr><td colspan="5" class="text-center text-muted">箱内暂无商品</td></tr>';
             return;
         }
         const otherOpts = otherBoxes.map(b => {
@@ -24503,6 +24503,10 @@ async function viewBoxProducts(boxId) {
             const isDelisted = p.is_delisted;
             const isArchived = p.is_archived;
             const rowClass = isArchived ? 'table-secondary' : (isDelisted ? 'table-warning' : '');
+            // 标签打印状态徽章（与发货清单/商品列表样式统一）
+            const labelBadge = p.label_printed
+                ? '<span class="badge bg-success">已打</span>'
+                : '<span class="badge bg-warning text-dark">未打</span>';
             // Action buttons
             let actionHtml = `<button class="btn btn-outline-warning btn-sm py-0" onclick="printProductLabel('${escHtml(p.item_id)}','${escHtml(p.item_title||'')}','${escHtml(box?.label||'')}')" title="打印标签"><i class="bi bi-printer"></i></button>`;
             if (isArchived) {
@@ -24518,11 +24522,12 @@ async function viewBoxProducts(boxId) {
                 <td>${imgSrc ? `<img src="${escHtml(imgSrc)}" style="width:48px;height:48px;object-fit:contain;background:#f8f9fa;cursor:pointer" onclick="previewImage('${escHtml(imgSrc)}')">` : ''}</td>
                 <td><small class="text-truncate d-inline-block" style="max-width:260px">${escHtml(p.item_title||'')}${isArchived ? ' <span class="badge bg-secondary">已归档</span>' : (isDelisted ? ' <span class="badge bg-danger">已下架</span>' : '')}</small></td>
                 <td><small>${p.item_price||''}</small></td>
+                <td>${labelBadge}</td>
                 <td>${actionHtml}</td>
             </tr>`;
         }).join('');
     } catch (e) {
-        document.getElementById('boxProductsTbody').innerHTML = `<tr><td colspan="4" class="text-center text-danger">加载失败: ${escHtml(e.message)}</td></tr>`;
+        document.getElementById('boxProductsTbody').innerHTML = `<tr><td colspan="5" class="text-center text-danger">加载失败: ${escHtml(e.message)}</td></tr>`;
     }
 }
 

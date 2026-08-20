@@ -115,6 +115,15 @@
   - 筛选下拉新增「未打标签」「已打标签」两项（客户端过滤：在售 + 未归档 + 打印状态）
 - **自测**：`tests/test_inventory_print_status_views.py`（5 用例，临时数据库隔离，全部通过）；另用临时服务 + 浏览器实机验证三态颜色、卡片徽章、筛选结果、打印后进度同步
 
+### 3.13 箱内商品弹窗增加标签打印状态列（2026-08-20）
+- **需求**：箱子管理页点开具体箱子后，弹窗内的商品列表不显示标签是否打印，需补充
+- **方案**：后端 `GET /api/inventory/boxes/{box_id}/products` 已返回 `label_printed`（`get_box_products` SQL 含 `pb.label_printed`），仅前端未展示，纯前端改动
+- **改动**：
+  - `static/index.html`：弹窗表头在「价格」与「操作」间加「标签」列，初始占位 `colspan` 4→5
+  - `static/js/app.js`：`viewBoxProducts` 每行加标签状态徽章（`已打 bg-success` / `未打 bg-warning text-dark`，与发货清单/商品列表样式统一），加载中/空态/错误态 `colspan` 4→5
+  - 打印成功后 `printProductLabel` 已有的弹窗刷新逻辑使徽章实时更新（无需额外改动）
+- **验证**：临时服务 + 浏览器实机验证表头/徽章/打印回写后徽章实时更新
+
 ---
 
 ## 四、功能设计决策
