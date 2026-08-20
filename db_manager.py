@@ -11473,14 +11473,15 @@ Cookie数量: {cookie_count}
                 return None
 
     def get_boxes(self) -> list[dict]:
-        """获取所有箱子（含商品数和满状态）。"""
+        """获取所有箱子（含商品数、已打印数和满状态）。"""
         with self.lock:
             cursor = self.conn.cursor()
             cursor.execute('''
                 SELECT b.id, b.label, b.box_type, b.ip_tags, b.cat_tags,
                        b.capacity, b.is_full, b.barcode, b.location, b.priority,
                        b.created_at, b.updated_at, b.is_default, b.is_archive,
-                       COUNT(pb.id) AS product_count
+                       COUNT(pb.id) AS product_count,
+                       COALESCE(SUM(pb.label_printed), 0) AS printed_count
                 FROM inventory_boxes b
                 LEFT JOIN inventory_product_box pb ON pb.box_id = b.id
                 GROUP BY b.id
@@ -11490,14 +11491,15 @@ Cookie数量: {cookie_count}
             return [self._row_to_box(r) for r in rows]
 
     def get_box(self, box_id: int) -> Optional[dict]:
-        """获取单个箱子。"""
+        """获取单个箱子（含商品数、已打印数和满状态）。"""
         with self.lock:
             cursor = self.conn.cursor()
             cursor.execute('''
                 SELECT b.id, b.label, b.box_type, b.ip_tags, b.cat_tags,
                        b.capacity, b.is_full, b.barcode, b.location, b.priority,
                        b.created_at, b.updated_at, b.is_default, b.is_archive,
-                       COUNT(pb.id) AS product_count
+                       COUNT(pb.id) AS product_count,
+                       COALESCE(SUM(pb.label_printed), 0) AS printed_count
                 FROM inventory_boxes b
                 LEFT JOIN inventory_product_box pb ON pb.box_id = b.id
                 WHERE b.id = ?
@@ -11947,6 +11949,7 @@ Cookie数量: {cookie_count}
             'is_default': bool(row[12]) if len(row) > 12 else False,
             'is_archive': bool(row[13]) if len(row) > 13 else False,
             'product_count': row[14] if len(row) > 14 else 0,
+            'printed_count': row[15] if len(row) > 15 else 0,
         }
 
     def _row_to_product_box(self, row) -> dict:
@@ -12105,6 +12108,12 @@ Cookie数量: {cookie_count}
                     WHERE pb.item_id = ? LIMIT 1
                 """, (item_id,))
                 box_row = cursor.fetchone()
+                # 查询打印状态（多箱时任一为 1 即视为已打印）
+                cursor.execute(
+                    "SELECT MAX(label_printed) FROM inventory_product_box WHERE item_id = ?",
+                    (item_id,),
+                )
+                printed = cursor.fetchone()[0]
                 parents.append({
                     'id': r[0], 'item_id': item_id, 'title': r[2] or '',
                     'images': self._json_loads_safe(r[3], []), 'props': r[4],
@@ -12112,6 +12121,7 @@ Cookie数量: {cookie_count}
                     'skus': skus, 'sku_count': len(skus),
                     'box_id': box_row[0] if box_row else None,
                     'box_label': box_row[1] if box_row else '',
+                    'label_printed': bool(printed) if printed is not None else False,
                     'is_delisted': (r[6] == 'delisted'),
                     'is_archived': bool(box_row[2]) if box_row else False,
                     'original_box_id': box_row[3] if box_row else None,

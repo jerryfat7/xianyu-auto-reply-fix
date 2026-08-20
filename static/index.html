@@ -4121,8 +4121,8 @@
             <button class="btn btn-outline-secondary btn-sm ms-2" onclick="loadBoxes()"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
           </div></div>
           <div class="card"><div class="table-responsive"><table class="table table-hover mb-0">
-            <thead><tr><th>标签</th><th>类型</th><th>IP</th><th>品类</th><th>容量</th><th>状态</th><th>优先级</th><th>位置</th><th>操作</th></tr></thead>
-            <tbody id="boxesTableBody"><tr><td colspan="9" class="text-center text-muted">加载中...</td></tr></tbody>
+            <thead><tr><th>标签</th><th>类型</th><th>IP</th><th>品类</th><th>容量</th><th>打印进度</th><th>状态</th><th>优先级</th><th>位置</th><th>操作</th></tr></thead>
+            <tbody id="boxesTableBody"><tr><td colspan="10" class="text-center text-muted">加载中...</td></tr></tbody>
           </table></div></div>
         </div>
         <div id="inv-tab-products" style="display:none">
@@ -4149,6 +4149,9 @@
                   <li><a class="dropdown-item" href="javascript:void(0)" onclick="filterInventoryProducts('all')">全部</a></li>
                   <li><a class="dropdown-item" href="javascript:void(0)" onclick="filterInventoryProducts('delisted')">已下架（未归档）</a></li>
                   <li><a class="dropdown-item" href="javascript:void(0)" onclick="filterInventoryProducts('archived')">已归档</a></li>
+                  <li><hr class="dropdown-divider"></li>
+                  <li><a class="dropdown-item" href="javascript:void(0)" onclick="filterInventoryProducts('unprinted')">未打标签</a></li>
+                  <li><a class="dropdown-item" href="javascript:void(0)" onclick="filterInventoryProducts('printed')">已打标签</a></li>
                 </ul>
               </div>
               <span id="inventorySyncStatus" class="small text-muted"></span>

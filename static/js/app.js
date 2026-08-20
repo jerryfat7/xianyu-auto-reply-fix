@@ -24229,13 +24229,13 @@ function showInventoryTab(tab) {
 
 async function loadBoxes() {
     const tbody = document.getElementById('boxesTableBody');
-    tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">加载中...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">加载中...</td></tr>';
     try {
         const token = localStorage.getItem('auth_token') || '';
         const resp = await fetch('/api/inventory/boxes', { headers: { 'Authorization': `Bearer ${token}` } });
         const data = await resp.json();
         if (!data.boxes || data.boxes.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">暂无箱子，请新建</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">暂无箱子，请新建</td></tr>';
             return;
         }
         tbody.innerHTML = data.boxes.map(b => {
@@ -24243,6 +24243,14 @@ async function loadBoxes() {
             const isDefault = b.is_default;
             const fullIcon = b.is_full ? '<span class="badge bg-danger">满</span>' : (isArchive ? '' : '<span class="badge bg-success">可分配</span>');
             const capText = b.capacity ? `${b.product_count}/${b.capacity}` : `${b.product_count}/-`;
+            // 打印进度三态（空箱/归档箱显示 —）
+            const printText = (b.product_count > 0 && !isArchive)
+                ? (b.printed_count >= b.product_count
+                    ? `<span class="badge bg-success">已打 ${b.printed_count}/${b.product_count}</span>`
+                    : (b.printed_count > 0
+                        ? `<span class="badge bg-warning text-dark">已打 ${b.printed_count}/${b.product_count}</span>`
+                        : `<span class="badge bg-secondary">已打 0/${b.product_count}</span>`))
+                : '<span class="text-muted">—</span>';
             const defaultBadge = isDefault ? ' <span class="badge bg-warning text-dark">系统</span>' : (isArchive ? ' <span class="badge bg-secondary">归档</span>' : '');
             const archiveActions = isArchive ? '<span class="small text-muted">—</span>' : '';
             const normalActions = isArchive ? '' : `<button class="btn btn-sm btn-outline-primary" onclick="editBox(${b.id})" title="编辑"><i class="bi bi-pencil"></i></button>
@@ -24257,6 +24265,7 @@ async function loadBoxes() {
                 <td><small>${escHtml(b.ip_tags)}</small></td>
                 <td><small>${escHtml(b.cat_tags)}</small></td>
                 <td>${capText}</td>
+                <td>${printText}</td>
                 <td>${fullIcon}</td>
                 <td>${b.priority}</td>
                 <td>${escHtml(b.location)}</td>
@@ -24264,7 +24273,7 @@ async function loadBoxes() {
             </tr>`;
         }).join('');
     } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="9" class="text-center text-danger">加载失败: ${escHtml(e.message)}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="10" class="text-center text-danger">加载失败: ${escHtml(e.message)}</td></tr>`;
     }
 }
 
@@ -24753,7 +24762,7 @@ async function doReboxAll() {
 // ---- 商品列表 (SKU 折叠) ----
 
 let inventorySearchText = '';
-let inventoryFilter = 'all';  // 'all' | 'delisted' | 'archived'
+let inventoryFilter = 'all';  // 'all' | 'delisted' | 'archived' | 'unprinted' | 'printed'
 
 async function syncInventoryFromXianyu() {
     const btn = document.getElementById('btnInventorySync');
@@ -24802,8 +24811,8 @@ async function clearInventorySearch() {
 
 async function filterInventoryProducts(filterValue) {
     inventoryFilter = filterValue;
-    document.getElementById('inventoryFilterBtn').textContent = 
-        filterValue === 'all' ? '全部' : (filterValue === 'delisted' ? '已下架' : '已归档');
+    const labels = { 'all': '全部', 'delisted': '已下架', 'archived': '已归档', 'unprinted': '未打标签', 'printed': '已打标签' };
+    document.getElementById('inventoryFilterBtn').textContent = labels[filterValue] || '全部';
     await loadInventoryProducts();
 }
 
@@ -24848,6 +24857,8 @@ async function loadInventoryProducts() {
         let products = data.products || [];
         if (inventoryFilter === 'delisted') products = products.filter(p => p.is_delisted && !p.is_archived);
         else if (inventoryFilter === 'archived') products = products.filter(p => p.is_archived);
+        else if (inventoryFilter === 'unprinted') products = products.filter(p => !p.is_delisted && !p.is_archived && !p.label_printed);
+        else if (inventoryFilter === 'printed') products = products.filter(p => !p.is_delisted && !p.is_archived && p.label_printed);
         if (products.length === 0) {
             cardsDiv.innerHTML = '<div class="col-12 text-muted">' + (inventorySearchText ? '没有匹配的商品' : '暂无商品数据（需先从闲鱼同步商品信息）') + '</div>';
             return;
@@ -24856,6 +24867,9 @@ async function loadInventoryProducts() {
             const isMulti = p.sku_count > 1;
             const isDelisted = p.is_delisted;
             const isArchived = p.is_archived;
+            const printBadge = p.label_printed
+                ? '<span class="badge bg-success">已打</span>'
+                : '<span class="badge bg-warning text-dark">未打</span>';
             const skuRows = p.skus.map(s => `
                 <tr>
                     <td><small>${escHtml(s.props_text) || '默认'}</small></td>
@@ -24869,7 +24883,7 @@ async function loadInventoryProducts() {
               <div class="card h-100 d-flex flex-column ${(isDelisted || isArchived) ? 'opacity-75' : ''}">
                 <div class="card-header py-1 d-flex justify-content-between align-items-start">
                   <span class="small fw-bold" style="max-width:70%;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.3">${escHtml(p.title)}</span>
-                  ${isArchived ? '<span class="badge bg-secondary">已归档</span>' : (isDelisted ? '<span class="badge bg-danger">已下架</span>' : (isMulti ? '<span class="badge bg-info">'+p.sku_count+'规格</span>' : '<span class="badge bg-secondary">单规格</span>'))}
+                  ${isArchived ? '<span class="badge bg-secondary">已归档</span>' : (isDelisted ? '<span class="badge bg-danger">已下架</span>' : (isMulti ? '<span class="badge bg-info">'+p.sku_count+'规格</span>' : '<span class="badge bg-secondary">单规格</span>'))}${printBadge}
                 </div>
                 <div class="card-body px-2 flex-grow-0" style="padding-top:2px;padding-bottom:2px">
                   ${isMulti ? `

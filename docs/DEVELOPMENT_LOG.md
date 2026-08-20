@@ -104,6 +104,17 @@
   - 前端 `printProductLabel` 打印成功后刷新箱内商品/发货清单/商品列表视图的徽章
 - **自测**：`tests/test_label_printed_writeback.py`（9 用例，mock `label_print_client.get_client`，临时数据库隔离，全部通过）
 
+### 3.12 箱子/商品页增加打印状态标识（2026-08-20）
+- **需求**：此前打印状态仅在发货清单页展示，箱子管理页与商品列表页看不到打印进度
+- **后端改动**：
+  - `GET /api/inventory/boxes`：每个箱子新增 `printed_count`（`COALESCE(SUM(pb.label_printed),0)` 单条聚合 SQL，无 N+1）
+  - `GET /api/inventory/parent-products`：每个商品新增 `label_printed: bool`（`SELECT MAX(label_printed)` 按 item_id 聚合，多箱任一为 1 即 true；未入箱返回 false）
+- **前端改动**：
+  - 箱子管理页：容量列后新增「打印进度」列，`已打 X/Y` 三态 badge（全部 `bg-success` / 部分 `bg-warning text-dark` / 未打 `bg-secondary`，空箱/归档箱显示 `—`），表头与 colspan 9→10
+  - 商品列表页：卡片 header 追加「已打/未打」徽章（`bg-success` / `bg-warning text-dark`），可与已下架/已归档徽章并列
+  - 筛选下拉新增「未打标签」「已打标签」两项（客户端过滤：在售 + 未归档 + 打印状态）
+- **自测**：`tests/test_inventory_print_status_views.py`（5 用例，临时数据库隔离，全部通过）；另用临时服务 + 浏览器实机验证三态颜色、卡片徽章、筛选结果、打印后进度同步
+
 ---
 
 ## 四、功能设计决策
