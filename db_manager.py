@@ -12205,25 +12205,6 @@ Cookie数量: {cookie_count}
                 self.conn.rollback()
                 return 0
 
-    def touch_parents_updated_at(self, cookie_id: str, item_ids: list) -> int:
-        """刷新一批在售商品的 updated_at 为当前时间（用于商品列表"最新在上"排序）。"""
-        if not item_ids:
-            return 0
-        with self.lock:
-            try:
-                cursor = self.conn.cursor()
-                placeholders = ','.join(['?'] * len(item_ids))
-                cursor.execute(f"""
-                    UPDATE item_parents SET updated_at = CURRENT_TIMESTAMP
-                    WHERE cookie_id = ? AND item_id IN ({placeholders}) AND status = 'active'
-                """, [cookie_id] + list(item_ids))
-                self.conn.commit()
-                return cursor.rowcount
-            except Exception as e:
-                logger.error(f"刷新商品更新时间失败: {e}")
-                self.conn.rollback()
-                return 0
-
     def delete_delisted_product(self, item_id: str) -> bool:
         """删除已下架商品（含箱子映射、父商品、SKU、详情）。"""
         with self.lock:

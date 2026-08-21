@@ -79,15 +79,20 @@ class ParentProductsOrderingTest(unittest.TestCase):
         p004 = next(p for p in products if p["item_id"] == "O-004")
         self.assertTrue(p004["is_archived"])
 
-    def test_touch_parents_updated_at_moves_to_top(self):
-        """touch 后该商品排最前（模拟"刚同步的最上面"）。"""
-        db_manager.touch_parents_updated_at("cookie-ord", ["O-002"])
+    def test_z_newly_inserted_product_moves_to_top(self):
+        """新入库商品（updated_at 为当前时间）应排最前（模拟"刚上架的最上面"）。"""
+        cur = db_manager.conn.cursor()
+        cur.execute(
+            "INSERT INTO item_parents (item_id, title, status, cookie_id, updated_at) VALUES (?,?,?,?,CURRENT_TIMESTAMP)",
+            ("O-NEW", "全新上架商品", 'active', 'cookie-ord'),
+        )
+        db_manager.conn.commit()
+
         products = db_manager.get_parent_products()
         order = [p["item_id"] for p in products if p["item_id"].startswith("O-")]
-        # O-002 被 touch 后置顶（其余未归档仍按时间，归档仍置底）
-        self.assertEqual(order[0], "O-002")
+        self.assertEqual(order[0], "O-NEW")
+        # 归档商品仍置底
         self.assertEqual(order[-1], "O-004")
-        self.assertIn("O-003", order[1:3])
 
     def test_search_still_applies_ordering(self):
         """搜索"商品"时排序仍生效。"""

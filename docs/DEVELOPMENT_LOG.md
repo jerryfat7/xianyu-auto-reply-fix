@@ -133,6 +133,13 @@
 - **说明**：`updated_at` 语义 = 首次入库 / 状态切换 / 最近一次同步
 - **自测**：`tests/test_parent_products_ordering.py`（3 用例：时间倒序+归档置底 / touch 置顶 / 搜索时排序仍生效）
 
+### 3.14.1 修复：排序结果反了（新上架商品靠后）（2026-08-21）
+- **现象**：上一版加了 `touch_parents_updated_at` 在同步时把**全部在售商品**的 `updated_at` 统一刷成同一时刻，导致排序时间戳同质化，SQLite 退化为按 `rowid`（插入顺序）排 —— 新上架商品（rowid 大）反而排到后面；归档置底仍生效，所以新商品正好排在归档商品前
+- **修复**：移除 `db_manager.touch_parents_updated_at` 方法及 `reply_server.inventory_sync_from_xianyu` 中的调用
+  - 恢复后 `updated_at` 语义 = 首次入库 / 状态切换（delisted↔active）
+  - 新上架商品入库时 `updated_at` 为当前时刻（最大）→ 自然排最前
+- **自测**：`test_parent_products_ordering.py` 改为验证「新入库商品排最前 + 归档置底」
+
 ---
 
 ## 四、功能设计决策
