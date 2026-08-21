@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""商品列表排序规则自测：已归档置底 + updated_at 降序（最新在上）。
+"""商品列表排序规则自测：归档置底 + updated_at 降序 + 同时间戳按 id 降序。
 
 覆盖：
 1. 未归档商品按 updated_at 降序（最新在上）
-2. 已归档商品全部置底（内部仍按时间降序）
-3. touch_parents_updated_at 刷新后该商品置顶
-4. 搜索时排序同样生效
+2. 已归档商品全部置底
+3. updated_at 相同时按 id 降序（最新入库在前，兜底同步刷平时间戳的场景）
+4. 新入库商品（updated_at 为当前时间）排最前
+5. 搜索时排序同样生效
 
 数据库使用临时文件（DB_PATH 环境变量），不触碰真实数据。
 """
@@ -78,6 +79,21 @@ class ParentProductsOrderingTest(unittest.TestCase):
         self.assertEqual(order[-1], "O-004")
         p004 = next(p for p in products if p["item_id"] == "O-004")
         self.assertTrue(p004["is_archived"])
+
+    def test_same_updated_at_uses_id_desc(self):
+        """updated_at 相同时按 id 降序（最新入库在前）——兜底同步刷平时间戳的场景。"""
+        cur = db_manager.conn.cursor()
+        for iid, title in [("T-1", "同时间1"), ("T-2", "同时间2"), ("T-3", "同时间3")]:
+            cur.execute(
+                "INSERT INTO item_parents (item_id, title, status, cookie_id, updated_at) VALUES (?,?,?,?,?)",
+                (iid, title, 'active', 'cookie-ord', '2026-08-21 06:00:25'),
+            )
+        db_manager.conn.commit()
+
+        products = db_manager.get_parent_products()
+        order = [p["item_id"] for p in products if p["item_id"].startswith("T-")]
+        # 三件 updated_at 完全相同，应按 id 降序：后插入的 T-3 在最前
+        self.assertEqual(order, ["T-3", "T-2", "T-1"])
 
     def test_z_newly_inserted_product_moves_to_top(self):
         """新入库商品（updated_at 为当前时间）应排最前（模拟"刚上架的最上面"）。"""

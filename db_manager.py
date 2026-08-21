@@ -12064,12 +12064,15 @@ Cookie数量: {cookie_count}
     def get_parent_products(self, cookie_id: str = '', search_text: str = '') -> list[dict]:
         """获取父商品列表（含 SKU 子列表）。
 
-        排序规则：已归档商品置底（archived 升序），其余按更新时间 updated_at 降序（最新在上）。
+        排序规则（三键）：已归档商品置底（archived 升序）；
+        updated_at 降序（最新在上）；updated_at 相同时按 id 降序（最新入库在前，
+        用于同步刷平时间戳时兜底，避免退化为插入顺序导致新商品沉底）。
         """
         sort_clause = """
             ORDER BY
                 COALESCE((SELECT MAX(pb.archived) FROM inventory_product_box pb WHERE pb.item_id = ip.item_id), 0) ASC,
-                ip.updated_at DESC
+                ip.updated_at DESC,
+                ip.id DESC
         """
         with self.lock:
             cursor = self.conn.cursor()

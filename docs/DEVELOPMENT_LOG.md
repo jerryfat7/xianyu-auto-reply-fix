@@ -140,6 +140,15 @@
   - 新上架商品入库时 `updated_at` 为当前时刻（最大）→ 自然排最前
 - **自测**：`test_parent_products_ordering.py` 改为验证「新入库商品排最前 + 归档置底」
 
+### 3.14.2 修复：排序仍"反"（并列键 ip.id DESC 方案）（2026-08-21）
+- **现象**：移除 touch 后排序仍表现为"最新上架的在底部、归档在最后"（线上数据坐实）
+- **根因**：`mark_delisted_items()` 每次同步把**状态变化**的商品 `updated_at = CURRENT_TIMESTAMP` 批量刷成**同一秒** → 236/290（81%）商品时间戳完全相同 → 主排序键 `updated_at DESC` 失效 → SQLite 按 rowid（插入顺序）返回 → 最新入库商品沉底，观感"排序反了"
+- **方案**（详设：并列键方案，改动 1 行 SQL）：`get_parent_products` 的 `sort_clause` 增加 `ip.id DESC`
+  - 三键：归档置底（archived ASC）→ updated_at DESC（有差异时最新在上）→ id DESC（同时间戳时最新入库在前，兜底同步刷平场景）
+  - 无需改表/回填，重启容器生效；将来同步不再刷平时间戳则第 2 键恢复主导，第 3 键自动退居兜底
+- **自测**：`test_parent_products_ordering.py` 新增 `test_same_updated_at_uses_id_desc`（同时间戳按 id 降序），4 用例全部通过
+- **遗留**（详设 7.1，不影响本次）：`mark_delisted_items` 刷平时间戳是根本原因，中长期可区分"状态变化时间"与"商品更新时间"，或用详情接口取真实发布时间（方案B）
+
 ---
 
 ## 四、功能设计决策
